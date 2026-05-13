@@ -1,14 +1,14 @@
 # Build folders
-MCMCAN_1_KIT_TC375_LK/.ads/
-MCMCAN_1_KIT_TC375_LK/.settings/
-MCMCAN_1_KIT_TC375_LK/Configurations/
-MCMCAN_1_KIT_TC375_LK/Images/
-MCMCAN_1_KIT_TC375_LK/Libraries/
-MCMCAN_1_KIT_TC375_LK/Debug/
-MCMCAN_1_KIT_TC375_LK/Release/
-MCMCAN_1_KIT_TC375_LK/build/
-MCMCAN_1_KIT_TC375_LK/TriCore Debug (TASKING)/
-MCMCAN_1_KIT_TC375_LK/TriCore Release (TASKING)/
+.ads/
+.settings/
+Configurations/
+Images/
+Libraries/
+Debug/
+Release/
+build/
+TriCore Debug (TASKING)/
+TriCore Release (TASKING)/
 
 # Build files
 *.o
@@ -24,12 +24,6 @@ Thumbs.db
 *.swp
 *~
 
-# Python
-__pycache__/
-*.pyc
-.venv/
-venv/
-
 # VS Code
 .vscode/
 
@@ -38,6 +32,3 @@ venv/
 
 .lsl
 .launch
-.cproject
-.project
-.metadata/
