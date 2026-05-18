@@ -1,0 +1,15 @@
+# Eclipse/ADS 개인 설정
+.settings/
+
+# 빌드 산출물
+TriCore Debug (TASKING)/
+*.elf
+*.hex
+*.map
+*.siz
+*.src
+*.o
+*.d
+
+# 이미지 (용량 큰 경우)
+Images/
