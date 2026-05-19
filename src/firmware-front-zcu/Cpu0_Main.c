@@ -37,12 +37,20 @@
  *********************************************************************************************************************/
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "IfxPort.h"
+#include "_PinMap/IfxPort_PinMap.h"
 
-#include "App_Config.h"
 #include "FreeRTOS.h"
 #include "task.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
+
+#define LED1_PIN (&IfxPort_P00_5)
+#define LED2_PIN (&IfxPort_P00_6)
+
+static void init_led_pin(const IfxPort_Pin *pin);
+static void task_app_led1(void *arg);
+static void task_app_led2(void *arg);
 
 void core0_main(void)
 {
@@ -81,5 +89,37 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
     while (1)
     {
         __nop();
+    }
+}
+
+static void init_led_pin(const IfxPort_Pin *pin)
+{
+    IfxPort_setPinHigh(pin->port, pin->pinIndex);
+    IfxPort_setPinModeOutput(pin->port, pin->pinIndex, IfxPort_OutputMode_pushPull, IfxPort_OutputIdx_general);
+}
+
+static void task_app_led1(void *arg)
+{
+    (void)arg;
+
+    init_led_pin(LED1_PIN);
+
+    while (1)
+    {
+        IfxPort_togglePin(LED1_PIN->port, LED1_PIN->pinIndex);
+        vTaskDelay(pdMS_TO_TICKS(1000U));
+    }
+}
+
+static void task_app_led2(void *arg)
+{
+    (void)arg;
+
+    init_led_pin(LED2_PIN);
+
+    while (1)
+    {
+        IfxPort_togglePin(LED2_PIN->port, LED2_PIN->pinIndex);
+        vTaskDelay(pdMS_TO_TICKS(500U));
     }
 }
