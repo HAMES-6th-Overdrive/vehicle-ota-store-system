@@ -16,17 +16,17 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 # ==========================================
 LKAS_ENABLED        = True
 CAMERA_INDEX        = 0
-IMAGE_SIZE          = (1280, 720)
-ROI_START_RATIO     = 0.5
+IMAGE_SIZE          = (640, 360)
+ROI_START_RATIO     = 0.55
 CALIBRATION_OFFSET  = 0
 MAX_ANGLE           = 20.0
 SMOOTH_FRAMES       = 5
-LANE_SMOOTH_FRAMES  = 10          # ← 차선 중앙 smoothing 프레임 수
+LANE_SMOOTH_FRAMES  = 10
 STEER_DEADZONE      = 0.1
 ANGLE_DEADZONE      = 3.0
-SPEED_THRESHOLD     = 117
+SPEED_THRESHOLD     = 127
 STREAM_PORT         = 8080
-
+SENSITIVITY = 2.0  # 1.0이 기본, 높을수록 민감
 
 # ==========================================
 # 웹 스트리밍
@@ -82,7 +82,7 @@ class StreamHandler(BaseHTTPRequestHandler):
 
 def start_stream_server():
     server = HTTPServer(('0.0.0.0', STREAM_PORT), StreamHandler)
-    print(f"스트림 서버 시작: http://라즈베리파이IP:{STREAM_PORT}")
+    print(f"Stream server: http://RaspberryPi_IP:{STREAM_PORT}")
     server.serve_forever()
 
 
@@ -103,14 +103,14 @@ pygame.init()
 pygame.joystick.init()
 
 while pygame.joystick.get_count() == 0:
-    print("게임패드 연결 대기중...")
+    print("Waiting for gamepad...")
     time.sleep(1)
     pygame.joystick.quit()
     pygame.joystick.init()
 
 js = pygame.joystick.Joystick(0)
 js.init()
-print("게임패드 연결됨 :", js.get_name())
+print("Gamepad connected:", js.get_name())
 
 
 # ==========================================
@@ -122,10 +122,10 @@ cap.set(cv2.CAP_PROP_FRAME_HEIGHT, IMAGE_SIZE[1])
 cap.set(cv2.CAP_PROP_FPS, 30)
 
 if not cap.isOpened():
-    print("카메라 연결 실패")
+    print("Camera connection failed")
     exit()
 
-print("카메라 연결 성공")
+print("Camera connected")
 
 
 # ==========================================
@@ -152,12 +152,12 @@ def vision_preprocessing(frame):
     ycrcb     = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
     y, cr, cb = cv2.split(ycrcb)
 
-    clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
     y_eq     = clahe.apply(y)
 
     ycrcb_eq = cv2.merge([y_eq, cr, cb])
     bgr_eq   = cv2.cvtColor(ycrcb_eq, cv2.COLOR_YCrCb2BGR)
-    blurred  = cv2.GaussianBlur(bgr_eq, (5, 5), 0)
+    blurred  = cv2.GaussianBlur(bgr_eq, (3, 3), 0)
 
     return blurred, roi_y
 
@@ -205,7 +205,7 @@ def line_detection(mask, frame_w):
                 right_xs.append(x)
                 right_ys.append(y)
 
-    lane_center = _calc_lane_center(left_xs, left_ys, right_xs, right_ys, mask.shape[0])
+    lane_center = _calc_lane_center(left_xs, right_xs)
 
     has_left  = len(left_xs)  >= 5
     has_right = len(right_xs) >= 5
@@ -217,7 +217,7 @@ def line_detection(mask, frame_w):
 
     if lane_center is not None and status == "ok":
         offset      = frame_w // 2 - lane_center - CALIBRATION_OFFSET
-        steer_angle = -(offset / (frame_w // 2)) * MAX_ANGLE
+        steer_angle = -(offset / (frame_w // 2)) * MAX_ANGLE * SENSITIVITY
     else:
         offset      = 0
         steer_angle = None
@@ -225,31 +225,16 @@ def line_detection(mask, frame_w):
     return steer_angle, status, offset, lane_center, left_xs, left_ys, right_xs, right_ys
 
 
-def _calc_lane_center(left_xs, left_ys, right_xs, right_ys, roi_h):
-    bottom_y    = roi_h - 1
-    left_x_bot  = None
-    right_x_bot = None
+def _calc_lane_center(left_xs, right_xs):
+    left_x_mid  = int(np.median(left_xs))  if len(left_xs)  >= 5 else None
+    right_x_mid = int(np.median(right_xs)) if len(right_xs) >= 5 else None
 
-    if len(left_xs) >= 5:
-        try:
-            coeffs     = np.polyfit(left_ys, left_xs, 2)
-            left_x_bot = int(np.polyval(coeffs, bottom_y))
-        except Exception:
-            pass
-
-    if len(right_xs) >= 5:
-        try:
-            coeffs      = np.polyfit(right_ys, right_xs, 2)
-            right_x_bot = int(np.polyval(coeffs, bottom_y))
-        except Exception:
-            pass
-
-    if left_x_bot is not None and right_x_bot is not None:
-        return (left_x_bot + right_x_bot) // 2
-    elif left_x_bot is not None:
-        return left_x_bot
-    elif right_x_bot is not None:
-        return right_x_bot
+    if left_x_mid is not None and right_x_mid is not None:
+        return (left_x_mid + right_x_mid) // 2
+    elif left_x_mid is not None:
+        return left_x_mid
+    elif right_x_mid is not None:
+        return right_x_mid
     return None
 
 
@@ -267,22 +252,19 @@ def make_vis_frame(frame, mask, roi_y, steer_angle, status, offset,
     # ROI 경계선
     cv2.line(result, (0, roi_y), (frame_w, roi_y), (255, 255, 0), 1)
 
-    # 검출 픽셀 표시
-    for x, y in zip(left_xs, left_ys):
-        cv2.circle(result, (x, y + roi_y), 1, (0, 255, 0), -1)
-    for x, y in zip(right_xs, right_ys):
-        cv2.circle(result, (x, y + roi_y), 1, (0, 255, 0), -1)
-
-    # 2차 곡선 시각화
+    # ── 직선으로 차선 표시 (2차 곡선 제거) ──────────────
     for xs, ys in [(left_xs, left_ys), (right_xs, right_ys)]:
-        if len(xs) >= 10:
+        if len(xs) >= 5:
             try:
-                coeffs  = np.polyfit(ys, xs, 2)
-                y_range = np.linspace(min(ys), max(ys), 50)
-                x_range = np.polyval(coeffs, y_range)
-                pts     = np.array([[int(x), int(y + roi_y)]
-                                    for x, y in zip(x_range, y_range)], np.int32)
-                cv2.polylines(result, [pts], False, (0, 200, 255), 3)
+                y_min  = min(ys)
+                y_max  = max(ys)
+                # y_min, y_max에 해당하는 x 평균
+                x_top  = int(np.mean([x for x, y in zip(xs, ys) if y == y_min]))
+                x_bot  = int(np.mean([x for x, y in zip(xs, ys) if y == y_max]))
+                cv2.line(result,
+                         (x_top, y_min + roi_y),
+                         (x_bot, y_max + roi_y),
+                         (0, 200, 255), 3)
             except Exception:
                 pass
 
@@ -304,7 +286,7 @@ def make_vis_frame(frame, mask, roi_y, steer_angle, status, offset,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
 
     # 마스크 미리보기 (우상단)
-    mh, mw       = 120, 160
+    mh, mw       = 90, 120
     mask_preview = cv2.resize(mask, (mw, mh))
     mask_bgr     = cv2.cvtColor(mask_preview, cv2.COLOR_GRAY2BGR)
     result[10:10+mh, frame_w-mw-10:frame_w-10] = mask_bgr
@@ -312,13 +294,13 @@ def make_vis_frame(frame, mask, roi_y, steer_angle, status, offset,
     # 상태 텍스트
     color_map = {"ok": (0, 255, 0), "fail": (0, 0, 255)}
     cv2.putText(result, f"Angle: {steer_angle:+.1f} deg",
-                (10, 30),  cv2.FONT_HERSHEY_SIMPLEX, 0.8, color_map[status], 2)
+                (10, 25),  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_map[status], 2)
     cv2.putText(result, f"Status: {status}",
-                (10, 60),  cv2.FONT_HERSHEY_SIMPLEX, 0.6, color_map[status], 2)
+                (10, 50),  cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_map[status], 1)
     cv2.putText(result, f"Mode: {control_mode}",
-                (10, 90),  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                (10, 72),  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     cv2.putText(result, f"FPS: {fps:.1f}",
-                (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+                (10, 94),  cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
     return result
 
@@ -333,7 +315,7 @@ threading.Thread(target=start_stream_server, daemon=True).start()
 # 메인 루프
 # ==========================================
 angle_history       = deque(maxlen=SMOOTH_FRAMES)
-lane_center_history = deque(maxlen=LANE_SMOOTH_FRAMES)  # ← 차선 중앙 smoothing
+lane_center_history = deque(maxlen=LANE_SMOOTH_FRAMES)
 last_valid_angle    = 0.0
 prev_time           = time.time()
 
@@ -364,7 +346,7 @@ while True:
             if lane_center_history:
                 lane_center = int(np.mean(lane_center_history))
                 offset      = frame_w // 2 - lane_center - CALIBRATION_OFFSET
-                steer_angle = -(offset / (frame_w // 2)) * MAX_ANGLE
+                steer_angle = -(offset / (frame_w // 2)) * MAX_ANGLE * SENSITIVITY
         else:
             frame            = np.zeros((IMAGE_SIZE[1], IMAGE_SIZE[0], 3), dtype=np.uint8)
             frame_h, frame_w = IMAGE_SIZE[1], IMAGE_SIZE[0]
@@ -382,11 +364,11 @@ while True:
             smooth_angle = axis_steer * MAX_ANGLE
 
             if manual_steering:
-                control_mode = "수동"
+                control_mode = "MANUAL"
             elif not is_moving:
-                control_mode = "정지중 (LKAS 대기)"
+                control_mode = "STOPPED"
             else:
-                control_mode = "수동 (LKAS OFF)"
+                control_mode = "MANUAL(LKAS OFF)"
 
         else:
             if status == "ok" and steer_angle is not None:
@@ -417,18 +399,16 @@ while True:
         vis = make_vis_frame(frame, mask, roi_y, smooth_angle, status, offset,
                              lane_center, lxs, lys, rxs, rys,
                              frame_w, frame_h, control_mode, fps)
-        _, jpeg = cv2.imencode('.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        _, jpeg = cv2.imencode('.jpg', vis, [cv2.IMWRITE_JPEG_QUALITY, 50])
         with frame_lock:
             latest_frame = jpeg.tobytes()
 
         # ── 디버깅 출력 ───────────────────────────────────
-        print(f"[{control_mode}] Angle: {smooth_angle:+.1f}° | "
+        print(f"[{control_mode}] Angle: {smooth_angle:+.1f} | "
               f"Speed: {speed_byte} | Steer: {steer_byte} | FPS: {fps:.1f}")
         print(f"Packet: {packet.hex().upper()}")
         print("--------------------------------")
 
-        time.sleep(0.05)
-
     except Exception as e:
-        print("오류 발생 :", e)
+        print("Error:", e)
         time.sleep(1)
