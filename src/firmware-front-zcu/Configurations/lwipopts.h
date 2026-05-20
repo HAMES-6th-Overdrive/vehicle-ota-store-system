@@ -46,7 +46,7 @@
 
 #define ETH_PAD_SIZE            2                   /* Add 2 bytes before the Ethernet header to ensure payload alignment   */
 
-#define __LWIP_DEBUG__                              /* Enable debugging through UART interface                              */
+#define __LWIP_DEBUG__                               /* Enable debugging through UART interface                              */
 
 #define LWIP_NETIF_EXT_STATUS_CALLBACK  1           /* Enable an extended callback function for netif                       */
 
@@ -58,8 +58,8 @@
 #define IFX_LWIP_DEBUG          LWIP_DBG_OFF        /* IFX LwIP debug level set to OFF                                      */
 #endif
 #define DHCP_DEBUG              LWIP_DBG_OFF        /* Enable DHCP Debug                                                    */
-#define NETIF_DEBUG             LWIP_DBG_ON         /* Enable NETIF Debug                                                   */
-#define LWIP_DBG_TYPES_ON       LWIP_DBG_STATE      /* Enable only module state debug messages                              */
+#define NETIF_DEBUG             LWIP_DBG_OFF        /* Enable NETIF Debug                                                   */
+#define LWIP_DBG_TYPES_ON       LWIP_DBG_OFF        /* Disable debug message output                                         */
 
 #ifdef __GNUC__
     /* to avoid compiler error for double declaration we inform GNUC that ssize_t is declared by lwip */
