@@ -10,7 +10,7 @@
 #define APP_SOMEIP_TX_QUEUE_SIZE    (8u)
 #define APP_SOMEIP_RX_DRAIN_LIMIT   (4u)
 
-#define APP_SOMEIP_CLIENT_ID        (0x0001u)
+#define APP_SOMEIP_CLIENT_ID        (0x0002u)
 #define APP_SOMEIP_PORT             (30500u)
 
 #define APP_SOMEIP_SERVICE_COUNT    (4)
