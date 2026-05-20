@@ -46,6 +46,8 @@
 #include "App_Eth/App_Eth.h"
 #include "App_Someip/App_Someip.h"
 #include "App_InfoService/App_InfoService.h"
+#include "App_Can/App_Can.h"
+#include "App_CanTest/App_CanTest.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -71,6 +73,8 @@ void core0_main(void)
     /* 스케줄링 정상 확인용 LED 토글 태스크 등록 */
     xTaskCreate(task_app_led_500ms, "APP LED", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
 
+    AppCan_Start();
+    AppCanTest_Start();
     AppEth_Start();
     AppSomeip_Start();
     AppInfoService_Start();
