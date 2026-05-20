@@ -26,7 +26,7 @@
   *********************************************************************************************************************/
  /*\title TC375 FreeRTOS basic example
  * \abstract This example shows how to get started with using the AURIX(TM) FreeRTOS port
- * \description This example explores FreeRTOS usage on AURIX(TM) TC375 using two simple tasks and one interrupt
+ * \description This example explores FreeRTOS scheduling on AURIX(TM) TC375 using one 500ms LED task
  *
  * \name iLLD_TC375_ADS_FreeRTOS_Basic
  * \version V1.0.0
@@ -49,12 +49,10 @@
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
-#define LED1_PIN (&IfxPort_P00_5)
-#define LED2_PIN (&IfxPort_P00_6)
+#define LED_500MS_PIN (&IfxPort_P00_6)
 
 static void init_led_pin(const IfxPort_Pin *pin);
-static void task_app_led1(void *arg);
-static void task_app_led2(void *arg);
+static void task_app_led_500ms(void *arg);
 
 void core0_main(void)
 {
@@ -70,11 +68,8 @@ void core0_main(void)
     IfxCpu_emitEvent(&g_cpuSyncEvent);
     IfxCpu_waitEvent(&g_cpuSyncEvent, 1);
     
-    /* Create LED1 app task */
-    xTaskCreate(task_app_led1, "APP LED1", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
-
-    /* Create LED2 app task */
-    xTaskCreate(task_app_led2, "APP LED2", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
+    /* 스케줄링 정상 확인용 LED 토글 태스크 등록 */
+    xTaskCreate(task_app_led_500ms, "APP LED", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
 
     AppEth_Start();
     AppSomeip_Start();
@@ -106,28 +101,15 @@ static void init_led_pin(const IfxPort_Pin *pin)
     IfxPort_setPinModeOutput(pin->port, pin->pinIndex, IfxPort_OutputMode_pushPull, IfxPort_OutputIdx_general);
 }
 
-static void task_app_led1(void *arg)
+static void task_app_led_500ms(void *arg)
 {
     (void)arg;
 
-    init_led_pin(LED1_PIN);
+    init_led_pin(LED_500MS_PIN);
 
     while (1)
     {
-        IfxPort_togglePin(LED1_PIN->port, LED1_PIN->pinIndex);
-        vTaskDelay(pdMS_TO_TICKS(1000U));
-    }
-}
-
-static void task_app_led2(void *arg)
-{
-    (void)arg;
-
-    init_led_pin(LED2_PIN);
-
-    while (1)
-    {
-        IfxPort_togglePin(LED2_PIN->port, LED2_PIN->pinIndex);
+        IfxPort_togglePin(LED_500MS_PIN->port, LED_500MS_PIN->pinIndex);
         vTaskDelay(pdMS_TO_TICKS(500U));
     }
 }
