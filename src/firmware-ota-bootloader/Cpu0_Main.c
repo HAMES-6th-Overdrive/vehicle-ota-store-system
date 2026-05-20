@@ -29,18 +29,20 @@
 #include "IfxScuWdt.h"
 #include "Ifx_Cfg_Ssw.h"
 #include "ota_flash.h"
-#include <stdio.h>
-#include "IfxAsclin_Asc.h"
-#include "UART_VCOM.h"
+// #include <stdio.h>
+// #include "IfxAsclin_Asc.h"
 
-extern IfxAsclin_Asc g_ascPrint;
+
+/*
+ #include "UART_VCOM.h"
+ extern IfxAsclin_Asc g_ascPrint;
 
 int _write(int fd, char *buf, int len)
 {
     Ifx_SizeT count = len;
     IfxAsclin_Asc_write(&g_ascPrint, buf, &count, TIME_INFINITE);
     return count;
-}
+}*/
 
 // IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -64,8 +66,8 @@ void core0_main(void)
     IfxCpu_emitEvent(&cpuSyncEvent);
     IfxCpu_waitEvent(&cpuSyncEvent, 1);
 
-    init_UART();
-    printf("Core0 Main\n");
+    //init_UART();
+    //printf("Core0 Main\n");
 
     Bootloader_Main();
     while(1)

@@ -120,7 +120,7 @@ void SOTA_SwapToGroupB(void)
     if (cur >= 0)
         InvalidateSwapEntry((uint32)cur);  /* 이전 Entry 무효화 */
 
-    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+    //IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
 }
 
 void SOTA_SwapToGroupA(void)
@@ -138,7 +138,7 @@ void SOTA_SwapToGroupA(void)
     if (cur >= 0)
         InvalidateSwapEntry((uint32)cur);
 
-    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+    //IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
 }
 
 boolean SOTA_IsGroupBActive(void)

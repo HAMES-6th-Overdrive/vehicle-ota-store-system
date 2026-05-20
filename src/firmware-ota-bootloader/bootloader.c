@@ -101,10 +101,10 @@ void Bootloader_Main(void)
         {
             OTA_Flash_ClearFlag();
 
-            if (SOTA_IsGroupBActive())
-                SOTA_SwapToGroupA();
-            else
-                    SOTA_SwapToGroupB();
+            // if (SOTA_IsGroupBActive())
+            //     SOTA_SwapToGroupA();
+            // else
+            //     SOTA_SwapToGroupB();
                     
             Bootloader_JumpToApp(APP_START_ADDR);
         }
