@@ -43,6 +43,10 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#include "App_Eth/App_Eth.h"
+#include "App_Someip/App_Someip.h"
+#include "App_InfoService/App_InfoService.h"
+
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 #define LED1_PIN (&IfxPort_P00_5)
@@ -71,6 +75,10 @@ void core0_main(void)
 
     /* Create LED2 app task */
     xTaskCreate(task_app_led2, "APP LED2", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
+
+    AppEth_Start();
+    AppSomeip_Start();
+    AppInfoService_Start();
 
     /* Start the scheduler */
     vTaskStartScheduler();
