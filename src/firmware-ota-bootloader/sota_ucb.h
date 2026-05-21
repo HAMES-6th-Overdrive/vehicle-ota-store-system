@@ -11,6 +11,14 @@
 #define SWAP_MARKER_A    0x00000055UL   /* Group A (표준 맵) */
 #define SWAP_MARKER_B    0x000000AAUL   /* Group B (교대 맵) */
 
+#define SCU_STMEM1_ADDR               0xF0036184UL
+#define SCU_STMEM1_SWAP_CFG_MASK      0x00030000UL
+#define SCU_STMEM1_SWAP_CFG_POS       16U
+#define SOTA_SWAP_CFG_NONE            0U
+#define SOTA_SWAP_CFG_A               1U
+#define SOTA_SWAP_CFG_B               2U
+#define SOTA_SWAP_CFG_RESERVED        3U
+
 /* DFLASH 8바이트 쓰기 (공유) */
 void WriteDFlash8(uint32 addr, uint32 lo, uint32 hi);
 

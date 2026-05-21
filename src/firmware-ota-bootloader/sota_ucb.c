@@ -141,11 +141,25 @@ void SOTA_SwapToGroupA(void)
     //IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
 }
 
+static uint32 SOTA_GetSwapCfg(void)
+{
+    uint32 stmem1 = *(volatile uint32 *)SCU_STMEM1_ADDR;
+    return (stmem1 & SCU_STMEM1_SWAP_CFG_MASK) >> SCU_STMEM1_SWAP_CFG_POS;
+}
+
 boolean SOTA_IsGroupBActive(void)
 {
-    sint8 cur = FindCurrentSwapEntry();
-    if (cur < 0) return FALSE;
+    uint32 swapCfg = SOTA_GetSwapCfg();
 
-    uint32 markerL = *(volatile uint32*)(UCB_SWAP_ORIG + (uint32)cur * 0x10);
-    return (markerL == SWAP_MARKER_B) ? TRUE : FALSE;
+    if (swapCfg == SOTA_SWAP_CFG_B)
+    {
+        return TRUE;
+    }
+
+    if (swapCfg == SOTA_SWAP_CFG_A)
+    {
+        return FALSE;
+    }
+
+    return FALSE;
 }

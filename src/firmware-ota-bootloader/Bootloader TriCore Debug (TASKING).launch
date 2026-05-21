@@ -1,22 +1,28 @@
 <?xml version="1.0" encoding="UTF-8" standalone="no"?>
 <launchConfiguration type="com.rt.hightec.agent.launcher.launchConfigurationType">
-    <stringAttribute key="ACC_HW" value=""/>
+    <stringAttribute key="ACC_HW" value="DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU"/>
     <booleanAttribute key="ENABLE_AGENTLOG" value="false"/>
     <booleanAttribute key="ENABLE_FLASHING" value="true"/>
     <booleanAttribute key="ENABLE_STOPPING" value="true"/>
-    <stringAttribute key="EXECUTABLE_PATH" value="${workspace_loc}/Bootloader/TriCore Debug (TASKING)/Bootloader.elf"/>
+    <stringAttribute key="EXECUTABLE_PATH" value="${workspace_loc}/bootloader/TriCore Debug (TASKING)/bootloader.elf"/>
     <stringAttribute key="STOP_FUNCTION" value="core0_main"/>
     <stringAttribute key="SVD" value="C:/Infineon/AURIX-Studio-1.10.28/build_system/bundled-artefacts-repo/svd/tc37xpd/1.1-2/device.svd"/>
-    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="Bootloader"/>
+    <stringAttribute key="org.eclipse.cdt.launch.PROJECT_ATTR" value="bootloader"/>
     <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_PATHS">
-        <listEntry value="/Bootloader"/>
+        <listEntry value="/bootloader"/>
     </listAttribute>
     <listAttribute key="org.eclipse.debug.core.MAPPED_RESOURCE_TYPES">
         <listEntry value="4"/>
     </listAttribute>
-    <stringAttribute key="org.eclipse.debug.ui.ATTR_LOCATION" value="/Bootloader/Bootloader TriCore Debug (TASKING).launch"/>
-    <stringAttribute key="org.eclipse.debug.ui.ATTR_PROJECT_NAME" value="Bootloader"/>
+    <stringAttribute key="org.eclipse.debug.ui.ATTR_LOCATION" value="/bootloader/bootloader TriCore Debug (TASKING).launch"/>
+    <stringAttribute key="org.eclipse.debug.ui.ATTR_PROJECT_NAME" value="bootloader"/>
     <booleanAttribute key="org.eclipse.debug.ui.ATTR_SHARED" value="true"/>
-    <stringAttribute key="org.eclipse.tcf.debug.ProjectName" value="Bootloader"/>
-    <stringAttribute key="org.eclipse.tcf.debug.executable_name" value="${workspace_loc}/Bootloader/TriCore Debug (TASKING)/Bootloader.elf"/>
+    <stringAttribute key="org.eclipse.tcf.debug.MemoryMap" value="[{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;35095fd3-9d37-495c-aebd-db94e56215e1&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;67beaa35-735a-4953-884c-86baca9353b9&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;ef87ddfd-0843-490a-acc4-d7cad3d42f1b&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;d723c989-7623-4c84-b50f-d56d73abfebd&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;f62a245d-2f16-4691-94e8-f5fe6e35ed0e&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;d7ca2690-0fb6-4dca-b505-b740b34e5274&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;aaf82bcd-e8c1-4210-a6bf-7814d0d295a2&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;6479e924-1dba-46fc-be6a-e3a7f6f5d800&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 1: CPU1 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;c3c8f357-0119-4f44-9314-b7346b39b749&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 2: CPU2 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;6ebb88d7-c9b4-4e2f-9d88-13a48a7be064&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 0: CPU0 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;c212928e-e39f-4a8f-adc6-9da0386d1223&quot;},{&quot;FileName&quot;:&quot;C:/Develop/Project/2nd/bootloader/TriCore Debug (TASKING)/bootloader.elf&quot;,&quot;ID&quot;:&quot;/DAS JDS AURIX LITE KIT V2.0 (TC375) LK96UXZU/Core 1: CPU1 TriCore 1.6P&quot;,&quot;Flags&quot;:0,&quot;UUID&quot;:&quot;3dc72ce7-5996-4866-b235-ea1c33d794fc&quot;}]"/>
+    <stringAttribute key="org.eclipse.tcf.debug.PeerID" value="TCP:127.0.0.1:1534"/>
+    <stringAttribute key="org.eclipse.tcf.debug.ProjectName" value="bootloader"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.RunLocalAgent" value="false"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.RunLocalServer" value="false"/>
+    <booleanAttribute key="org.eclipse.tcf.debug.UseLocalAgent" value="false"/>
+    <stringAttribute key="org.eclipse.tcf.debug.executable_name" value="${workspace_loc}/bootloader/TriCore Debug (TASKING)/bootloader.elf"/>
+    <stringAttribute key="sessionID" value="33423e34-115e-42d6-a85c-7c15299d6200"/>
 </launchConfiguration>
