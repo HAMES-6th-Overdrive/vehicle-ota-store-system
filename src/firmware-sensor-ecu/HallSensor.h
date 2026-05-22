@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 void HallSensor_init(void);
+void HallSensor_updateMs(uint32_t periodMs);
 void HallSensor_update1ms(void);
 void HallSensor_calcSpeed10ms(void);
 
