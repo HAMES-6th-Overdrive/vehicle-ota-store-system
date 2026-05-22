@@ -6,7 +6,7 @@
 
 void HallSensor_init(void);
 void HallSensor_update1ms(void);
-void HallSensor_calcSpeed100ms(void);
+void HallSensor_calcSpeed10ms(void);
 
 uint8_t  HallSensor_isDetected(void);
 uint32_t HallSensor_getPulseCount(void);

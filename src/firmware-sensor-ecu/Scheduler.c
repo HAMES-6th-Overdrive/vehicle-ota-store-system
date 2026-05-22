@@ -277,6 +277,8 @@ static void task_1ms(void)
  */
 static void task_10ms(void)
 {
+    HallSensor_calcSpeed10ms();
+
 #if (FEATURE_TOF_SENSOR == 1U)
     sendTofDistanceData10ms();
 #else
@@ -321,7 +323,6 @@ static void task_100ms(void)
     /*
      * 실제 홀센서 기반 속도 계산
      */
-    HallSensor_calcSpeed100ms();
     vehicleSpeed = HallSensor_getVehicleSpeed();
 
 #endif

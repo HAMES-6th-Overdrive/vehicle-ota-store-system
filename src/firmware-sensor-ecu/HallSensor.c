@@ -24,11 +24,11 @@
 #define HALL_WHEEL_CIRCUMFERENCE_MM     (730U)
 
 /*
- * Scheduler.c의 100ms task에서 HallSensor_calcSpeed100ms() 호출
+ * Scheduler.c의 10ms task에서 HallSensor_calcSpeed10ms() 호출
  * 이 값은 timeout/debug 기준으로만 사용하고,
  * 실제 속도는 pulse interval 기반으로 계산한다.
  */
-#define HALL_SPEED_CALC_PERIOD_MS       (100U)
+#define HALL_SPEED_CALC_PERIOD_MS       (10U)
 
 /*
  * IIR filter alpha = 1 / 4
@@ -243,7 +243,7 @@ void HallSensor_update1ms(void)
     s_prevDetected = nowDetected;
 }
 
-void HallSensor_calcSpeed100ms(void)
+void HallSensor_calcSpeed10ms(void)
 {
     uint32_t rawSpeedX100;
     uint32_t denominator;
