@@ -251,7 +251,7 @@ static boolean Scheduler_consumeTaskFlag(volatile boolean *flag)
  */
 static void task_1ms(void)
 {
-    HallSensor_updateMs(1U);
+    HallSensor_update1ms();
 
     /*
      * RX ISR에서 복사해둔 0x600 UDS OTA Request를
@@ -277,6 +277,8 @@ static void task_1ms(void)
  */
 static void task_10ms(void)
 {
+    HallSensor_calcSpeed10ms();
+
 #if (FEATURE_TOF_SENSOR == 1U)
     sendTofDistanceData10ms();
 #else
