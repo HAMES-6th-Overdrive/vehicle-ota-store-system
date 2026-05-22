@@ -6,7 +6,8 @@ import socket
 import struct
 import time
 from collections import deque
-import RPi.GPIO as GPIO
+import RPi.GPIO as GPIO 
+import threading
 
 
 # ==========================================
@@ -21,11 +22,16 @@ ZCU_PORT = 30500
 RPI_IP   = "192.168.10.1"
 RPI_PORT = 30500
 
-SERVICE_ID_TX = 0x0002  
-METHOD_ID_TX  = 0x2002
+SERVICE_ID_TX = 0x0001  
+METHOD_ID_TX  = 0x1001
 
-SERVICE_ID_RX = 0x0001
-METHOD_ID_RX  = 0x1001
+# ToF RX
+SERVICE_ID_RX = 0x0002
+METHOD_ID_RX  = 0x2002
+
+# Vehicle Speed RX
+SERVICE_ID_SPEED = 0x0002
+METHOD_ID_SPEED  = 0x2003
 
 CLIENT_ID = 0x0001
 
@@ -57,17 +63,28 @@ print(f"Listening SOME/IP : {RPI_PORT}")
 # 차량 상태 설정
 # ==========================================
 
-NEUTRAL_SPEED = 127
+vehicle_speed = 0
 
-STOP_DEADZONE = 10
+# ==========================================
+# 기어 상태
+# ==========================================
+
+GEAR_P = "P"
+GEAR_D = "D"
+
+gear_state    = GEAR_P
+prev_button_p = False
+prev_button_d = False
 
 # ==========================================
 # FVSA 설정
 # ==========================================
 
+FVSA_ENABLED = True  # ← 추가
+
 STOP_TIME_THRESHOLD = 2.0
 
-DISTANCE_DIFF_THRESHOLD = 700
+DISTANCE_DIFF_THRESHOLD = 500
 
 TOF_SMOOTH_FRAMES = 5
 
@@ -90,20 +107,16 @@ buzzer.start(0)
 # ==========================================
 
 def beep():
-
-    buzzer.ChangeDutyCycle(50)
-
-    time.sleep(0.15)
-
-    buzzer.ChangeDutyCycle(0)
-
-    time.sleep(0.1)
-
-    buzzer.ChangeDutyCycle(50)
-
-    time.sleep(0.15)
-
-    buzzer.ChangeDutyCycle(0)
+    def _beep():
+        buzzer.ChangeDutyCycle(100)
+        time.sleep(0.15)
+        buzzer.ChangeDutyCycle(0)
+        time.sleep(0.1)
+        buzzer.ChangeDutyCycle(100)
+        time.sleep(0.15)
+        buzzer.ChangeDutyCycle(0)
+    
+    threading.Thread(target=_beep, daemon=True).start()
 
 # ==========================================
 # pygame 초기화
@@ -237,57 +250,86 @@ tof_distance_mm = None
 # [LOW][HIGH]
 # ==========================================
 
-def read_tof_someip():
+def read_someip():
 
     global tof_distance_mm
+    global vehicle_speed
 
     try:
 
-        data, addr = rx_sock.recvfrom(1024)
+        while True:
 
-        parsed = parse_someip(data)
+            data, addr = rx_sock.recvfrom(1024)
 
-        if parsed is None:
-            return
+            parsed = parse_someip(data)
 
-        if parsed["service_id"] != SERVICE_ID_RX:
-            return
+            if parsed is None:
+                continue
 
-        if parsed["method_id"] != METHOD_ID_RX:
-            return
+            service_id = parsed["service_id"]
+            method_id  = parsed["method_id"]
+            payload    = parsed["payload"]
 
-        payload = parsed["payload"]
+            # =========================
+            # ToF
+            # =========================
 
-        if len(payload) < 2:
-            return
+            if (
+                service_id == SERVICE_ID_RX
+                and method_id == METHOD_ID_RX
+            ):
 
-        low  = payload[0]
+                if len(payload) < 2:
+                    continue
 
-        high = payload[1]
+                low  = payload[0]
+                high = payload[1]
 
-        distance = low | (high << 8)
+                distance = low | (high << 8)
 
-        if 50 <= distance <= 10000:
+                if 50 <= distance <= 10000:
 
-            tof_history.append(distance)
+                    tof_history.append(distance)
 
-            tof_distance_mm = int(
-                sum(tof_history)
-                / len(tof_history)
-            )
+                    tof_distance_mm = int(
+                        sum(tof_history)
+                        / len(tof_history)
+                    )
 
-            print(
-                f"[RX SOME/IP] ToF : "
-                f"{tof_distance_mm} mm"
-            )
+                    print(
+                        f"[RX ToF] "
+                        f"{tof_distance_mm} mm"
+                    )
+
+            # =========================
+            # Vehicle Speed
+            # =========================
+
+            elif (
+                service_id == SERVICE_ID_SPEED
+                and method_id == METHOD_ID_SPEED
+            ):
+
+                if len(payload) < 2:
+                    continue
+
+                low  = payload[0]
+                high = payload[1]
+
+                vehicle_speed = low | (high << 8)
+
+                print(
+                    f"[RX Speed] "
+                    f"{vehicle_speed}"
+                )
 
     except BlockingIOError:
 
         pass
 
-    except Exception as rx_error:
+    except Exception as e:
 
-        print("RX Error :", rx_error)
+        print("RX Error :", e)
 
 # ==========================================
 # 메인 루프
@@ -312,82 +354,106 @@ while True:
         steer_byte = axis_to_byte(axis_steer)
 
         # ==================================
+        # 기어 버튼 입력
+        # ==================================
+
+        button_p = js.get_button(0)
+        button_d = js.get_button(1)
+
+        if button_p and not prev_button_p:
+            gear_state = GEAR_P
+            print("\n==========\nGEAR -> P\n==========\n")
+
+        if button_d and not prev_button_d:
+            gear_state = GEAR_D
+            print("\n==========\nGEAR -> D\n==========\n")
+
+        prev_button_p = button_p
+        prev_button_d = button_d
+
+        # ==================================
+        # P단이면 강제 중립
+        # ==================================
+
+        if gear_state == GEAR_P:
+            speed_byte = 127
+            steer_byte = 127
+
+        # ==================================
         # 차량 이동 상태
         # ==================================
 
-        is_moving = (
-            abs(speed_byte - NEUTRAL_SPEED)
-            > STOP_DEADZONE
-        )
+        is_moving = vehicle_speed > 0
 
         # ==================================
-        # SOME/IP ToF 수신
+        # SOME/IP 수신
         # ==================================
 
-        read_tof_someip()
+        read_someip()
 
         # ==================================
         # FVSA 로직
         # ==================================
+        if FVSA_ENABLED and gear_state == GEAR_D:
+            
+            if not is_moving:
 
-        if not is_moving:
+                if stopped_time is None:
 
-            if stopped_time is None:
+                        stopped_time = time.time()
 
-                stopped_time = time.time()
-
-            stop_duration = (
-                time.time()
-                - stopped_time
-            )
-
-            if (
-                stopped_distance is None
-                and tof_distance_mm is not None
-            ):
-
-                stopped_distance = tof_distance_mm
-
-            if (
-                stop_duration
-                > STOP_TIME_THRESHOLD
-                and stopped_distance is not None
-                and tof_distance_mm is not None
-            ):
-
-                dist_diff = (
-                    tof_distance_mm
-                    - stopped_distance
+                stop_duration = (
+                    time.time()
+                    - stopped_time
                 )
 
                 if (
-                    dist_diff
-                    > DISTANCE_DIFF_THRESHOLD
+                    stopped_distance is None
+                    and tof_distance_mm is not None
                 ):
 
-                    if not fvsa_triggered:
+                    stopped_distance = tof_distance_mm
 
-                        print("")
-                        print("================================")
-                        print(">>> FRONT VEHICLE MOVING <<<")
-                        print("================================")
-                        print("")
+                if (
+                    stop_duration
+                    > STOP_TIME_THRESHOLD
+                    and stopped_distance is not None
+                    and tof_distance_mm is not None
+                ):
 
-                        beep()
+                    dist_diff = (
+                        tof_distance_mm
+                        - stopped_distance
+                    )
 
-                        fvsa_triggered = True
+                    if (
+                        dist_diff
+                        > DISTANCE_DIFF_THRESHOLD
+                    ):
 
-        # ==================================
-        # 차량 움직이면 초기화
-        # ==================================
+                        if not fvsa_triggered:
 
-        else:
+                            print("")
+                            print("================================")
+                            print(">>> FRONT VEHICLE MOVING <<<")
+                            print("================================")
+                            print("")
 
-            stopped_time = None
+                            beep()
 
-            stopped_distance = None
+                            fvsa_triggered = True
 
-            fvsa_triggered = False
+            # ==================================
+            # 차량 움직이면 초기화
+            # ==================================
+
+            else:
+
+                stopped_time = None
+
+                stopped_distance = None
+
+                fvsa_triggered = False
 
         # ==================================
         # SOME/IP Payload 생성
@@ -452,7 +518,18 @@ while True:
 
         print(
             f"Moving State : "
-            f"{'MOVING' if is_moving else 'STOPPED'}"
+            f"{'MOVING' if is_moving else 'STOPPED'} "
+            f"(Vehicle Speed : {vehicle_speed})"
+        )
+
+        print(
+            f"Vehicle Speed : "
+            f"{vehicle_speed}"
+        )
+
+        print(
+            f"GEAR : "
+            f"{gear_state}"
         )
 
         if tof_distance_mm is not None:
