@@ -32,6 +32,14 @@
 #define LIGHT_SOMEIP_UDP_MAX_DATAGRAM (1500u)
 #endif
 
+#ifndef LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE
+#define LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE (4u)
+#endif
+
+#if LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE < 2
+#error "LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE must be at least 2"
+#endif
+
 #if defined(SOMEIP_UDP_PLATFORM_RPI)
 
 #include <arpa/inet.h>
@@ -135,15 +143,32 @@ int light_someip_udp_recv(uint8_t *buf, uint32_t buf_size, char remote_ip[SOMEIP
 #include "lwip/pbuf.h"
 #include "lwip/udp.h"
 
+typedef struct LightSomeipUdpRxSlot {
+    uint8_t buf[LIGHT_SOMEIP_UDP_MAX_DATAGRAM];
+    uint16_t len;
+    ip_addr_t remote_ip;
+    uint16_t remote_port;
+} LightSomeipUdpRxSlot;
+
 static struct udp_pcb *g_udp_pcb = NULL;
 
-static volatile uint8_t g_rx_ready = 0u;
-static uint8_t g_rx_buf[LIGHT_SOMEIP_UDP_MAX_DATAGRAM];
-static uint16_t g_rx_len = 0u;
-static ip_addr_t g_rx_remote_ip;
-static uint16_t g_rx_remote_port = 0u;
+static LightSomeipUdpRxSlot g_rx_queue[LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE];
+static volatile uint8_t g_rx_head = 0u;
+static volatile uint8_t g_rx_tail = 0u;
+
+static uint8_t light_someip_udp_next_rx_index(uint8_t index) {
+    index++;
+    if (index >= (uint8_t)LIGHT_SOMEIP_UDP_RX_QUEUE_SIZE) {
+        index = 0u;
+    }
+
+    return index;
+}
 
 static void light_someip_udp_on_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p, const ip_addr_t *addr, u16_t port) {
+    uint8_t next_head;
+    LightSomeipUdpRxSlot *slot;
+
     (void)arg;
     (void)pcb;
 
@@ -156,11 +181,18 @@ static void light_someip_udp_on_recv(void *arg, struct udp_pcb *pcb, struct pbuf
         return;
     }
 
-    g_rx_len = (uint16_t)p->tot_len;
-    (void)pbuf_copy_partial(p, g_rx_buf, g_rx_len, 0u);
-    g_rx_remote_ip = *addr;
-    g_rx_remote_port = (uint16_t)port;
-    g_rx_ready = 1u;
+    next_head = light_someip_udp_next_rx_index(g_rx_head);
+    if (next_head == g_rx_tail) {
+        pbuf_free(p);
+        return;
+    }
+
+    slot = &g_rx_queue[g_rx_head];
+    slot->len = (uint16_t)p->tot_len;
+    (void)pbuf_copy_partial(p, slot->buf, slot->len, 0u);
+    slot->remote_ip = *addr;
+    slot->remote_port = (uint16_t)port;
+    g_rx_head = next_head;
 
     pbuf_free(p);
 }
@@ -176,9 +208,8 @@ int light_someip_udp_init(uint16_t port) {
         return 0;
     }
 
-    g_rx_ready = 0u;
-    g_rx_len = 0u;
-    g_rx_remote_port = 0u;
+    g_rx_head = 0u;
+    g_rx_tail = 0u;
 
     g_udp_pcb = udp_new();
     if (g_udp_pcb == NULL) {
@@ -226,6 +257,8 @@ int light_someip_udp_send(const char *dst_ip, uint16_t dst_port, const uint8_t *
 }
 
 int light_someip_udp_recv(uint8_t *buf, uint32_t buf_size, char remote_ip[SOMEIP_IP_LEN], uint16_t *remote_port) {
+    uint8_t tail;
+    LightSomeipUdpRxSlot *slot;
     uint16_t copy_len;
 
     if ((g_udp_pcb == NULL) || (buf == NULL) || (buf_size == 0u) || (remote_ip == NULL) || (remote_port == NULL)) {
@@ -235,23 +268,24 @@ int light_someip_udp_recv(uint8_t *buf, uint32_t buf_size, char remote_ip[SOMEIP
     remote_ip[0] = '\0';
     *remote_port = 0u;
 
-    if (g_rx_ready == 0u) {
+    if (g_rx_tail == g_rx_head) {
         return 0;
     }
 
-    if (g_rx_len > buf_size) {
-        g_rx_ready = 0u;
-        g_rx_len = 0u;
+    tail = g_rx_tail;
+    slot = &g_rx_queue[tail];
+
+    if (slot->len > buf_size) {
+        g_rx_tail = light_someip_udp_next_rx_index(tail);
         return -1;
     }
 
-    copy_len = g_rx_len;
-    memcpy(buf, g_rx_buf, copy_len);
-    (void)ipaddr_ntoa_r(&g_rx_remote_ip, remote_ip, SOMEIP_IP_LEN);
-    *remote_port = g_rx_remote_port;
+    copy_len = slot->len;
+    memcpy(buf, slot->buf, copy_len);
+    (void)ipaddr_ntoa_r(&slot->remote_ip, remote_ip, SOMEIP_IP_LEN);
+    *remote_port = slot->remote_port;
 
-    g_rx_ready = 0u;
-    g_rx_len = 0u;
+    g_rx_tail = light_someip_udp_next_rx_index(tail);
 
     return (int)copy_len;
 }

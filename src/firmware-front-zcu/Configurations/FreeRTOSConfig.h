@@ -9,14 +9,14 @@
 
 #define configMAX_PRIORITIES                       ( 10 )
 #define configMINIMAL_STACK_SIZE                   ( ( unsigned short ) 256 )
-#define configTOTAL_HEAP_SIZE                      ( ( size_t ) ( 32U * 1024U ) )
+#define configTOTAL_HEAP_SIZE                      ( ( size_t ) ( 64U * 1024U ) )
 #define configMAX_TASK_NAME_LEN                    ( 16 )
 
 #define configENABLE_BACKWARD_COMPATIBILITY        0
 #define configUSE_TRACE_FACILITY                   0
 #define configUSE_16_BIT_TICKS                     0
 #define configIDLE_SHOULD_YIELD                    0
-#define configUSE_MALLOC_FAILED_HOOK               0
+#define configUSE_MALLOC_FAILED_HOOK               1
 #define configCHECK_FOR_STACK_OVERFLOW             1
 #define configUSE_TICK_HOOK                        0
 #define configUSE_COUNTING_SEMAPHORES              1

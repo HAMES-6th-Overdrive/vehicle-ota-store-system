@@ -19,7 +19,7 @@
 #define APP_CAN_FD_MAX_DLC                    (64u)
 
 #ifndef APP_CAN_INTERNAL_RX_QUEUE_SIZE
-#define APP_CAN_INTERNAL_RX_QUEUE_SIZE        (16u)
+#define APP_CAN_INTERNAL_RX_QUEUE_SIZE        (32u)
 #endif
 
 #ifndef APP_CAN_TX_QUEUE_SIZE

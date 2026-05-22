@@ -1,4 +1,6 @@
 #include "App_Someip.h"
+#include "App_AebService/App_AebService.h"
+#include "App_DriveService/App_DriveService.h"
 #include "App_Eth/App_Eth.h"
 #include "App_InfoService/App_InfoService.h"
 #include "task.h"
@@ -6,6 +8,7 @@
 
 #define APP_SOMEIP_TASK_STACK_SIZE  (1024u)
 #define APP_SOMEIP_TASK_PRIORITY    (tskIDLE_PRIORITY + 3u)
+#define APP_SOMEIP_INIT_RETRY_MS    (100u)
 
 #define APP_SOMEIP_TX_QUEUE_SIZE    (8u)
 #define APP_SOMEIP_RX_DRAIN_LIMIT   (4u)
@@ -20,11 +23,9 @@
 #define APP_SOMEIP_AEB_SERVICE      (0x0006u)
 #define APP_SOMEIP_INFO_SERVICE     (0x0007u)
 
-/* extern QueueHandle_t AppDriveService_GetSomeipRxQueue(void); */
-/* extern QueueHandle_t AppAebService_GetSomeipRxQueue(void); */
-/* extern QueueHandle_t AppSensorService_GetSomeipRxQueue(void); */
-
 static QueueHandle_t g_tx_queue;
+static TaskHandle_t g_someip_task_handle;
+static BaseType_t g_someip_ready = pdFALSE;
 static AppSomeipRoute g_app_routes[APP_SOMEIP_SERVICE_COUNT];
 
 static BaseType_t AppSomeip_Init(void);
@@ -32,11 +33,27 @@ static void AppSomeip_Task(void* arg);
 static void AppSomeip_ProcessRx(void);
 static void AppSomeip_ProcessTx(void);
 static QueueHandle_t AppSomeip_FindAppQueue(uint16_t service_id);
+static void AppSomeip_EnqueueRx(QueueHandle_t dst_queue, const AppSomeipRxMsg *rx_msg);
 
 BaseType_t AppSomeip_Start(void) {
-    if(AppSomeip_Init() != pdPASS) return pdFAIL;
+    BaseType_t result;
 
-    return xTaskCreate(AppSomeip_Task, "APP SOMEIP", APP_SOMEIP_TASK_STACK_SIZE, NULL, APP_SOMEIP_TASK_PRIORITY, NULL);
+    if(g_someip_task_handle != NULL) {
+        return pdPASS;
+    }
+
+    result = xTaskCreate(AppSomeip_Task,
+                         "APP SOMEIP",
+                         APP_SOMEIP_TASK_STACK_SIZE,
+                         NULL,
+                         APP_SOMEIP_TASK_PRIORITY,
+                         &g_someip_task_handle);
+
+    if(result != pdPASS) {
+        g_someip_task_handle = NULL;
+    }
+
+    return result;
 }
 
 static BaseType_t AppSomeip_Init(void) {
@@ -75,23 +92,32 @@ static BaseType_t AppSomeip_Init(void) {
         },
     };
 
-    if(AppEth_IsReady() != pdPASS) return pdFAIL;
-    if(light_someip_init(&config) != SOMEIP_OK) return pdFAIL;
-
-    g_tx_queue = xQueueCreate(APP_SOMEIP_TX_QUEUE_SIZE, sizeof(AppSomeipTxMsg));
-    if(g_tx_queue == NULL) return pdFAIL;
-
     g_app_routes[0].service_id = APP_SOMEIP_DRIVE_SERVICE;
-    g_app_routes[0].get_rx_queue = NULL; /* AppDriveService_GetSomeipRxQueue; */
+    g_app_routes[0].get_rx_queue = AppDriveService_GetSomeipRxQueue;
 
     g_app_routes[1].service_id = APP_SOMEIP_SENSOR_SERVICE;
-    g_app_routes[1].get_rx_queue = NULL; /* AppSensorService_GetSomeipRxQueue; */
+    /* Sensor service events feed AEB; AppSensorService is TX-only. */
+    g_app_routes[1].get_rx_queue = AppAebService_GetSomeipRxQueue;
 
     g_app_routes[2].service_id = APP_SOMEIP_AEB_SERVICE;
-    g_app_routes[2].get_rx_queue = NULL; /* AppAebService_GetSomeipRxQueue; */
+    g_app_routes[2].get_rx_queue = AppAebService_GetSomeipRxQueue;
 
     g_app_routes[3].service_id = APP_SOMEIP_INFO_SERVICE;
     g_app_routes[3].get_rx_queue = AppInfoService_GetSomeipRxQueue;
+
+    if(AppEth_IsReady() != pdPASS) return pdFAIL;
+
+    if(g_tx_queue == NULL) {
+        g_tx_queue = xQueueCreate(APP_SOMEIP_TX_QUEUE_SIZE, sizeof(AppSomeipTxMsg));
+        if(g_tx_queue == NULL) return pdFAIL;
+    }
+
+    if(light_someip_init(&config) != SOMEIP_OK) {
+        g_someip_ready = pdFALSE;
+        return pdFAIL;
+    }
+
+    g_someip_ready = pdTRUE;
 
     return pdPASS;
 }
@@ -100,7 +126,22 @@ static void AppSomeip_Task(void* arg) {
     (void)arg;
 
     for(;;) {
-        if(AppEth_IsReady() == pdPASS && g_tx_queue != NULL) {
+        if(AppEth_IsReady() != pdPASS) {
+            g_someip_ready = pdFALSE;
+            vTaskDelay(pdMS_TO_TICKS(APP_SOMEIP_INIT_RETRY_MS));
+            continue;
+        }
+
+        if(g_someip_ready != pdPASS) {
+            if(AppSomeip_Init() != pdPASS) {
+                g_someip_ready = pdFALSE;
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(APP_SOMEIP_INIT_RETRY_MS));
+            continue;
+        }
+
+        if(g_tx_queue != NULL) {
             AppSomeip_ProcessRx();
             AppSomeip_ProcessTx();
         }
@@ -131,7 +172,7 @@ static void AppSomeip_ProcessRx(void) {
         memcpy(rx_msg.remote_ip, remote_ip, SOMEIP_IP_LEN);
         rx_msg.remote_port = remote_port;
 
-        (void)xQueueSend(dst_queue, &rx_msg, 0);
+        AppSomeip_EnqueueRx(dst_queue, &rx_msg);
     }
 }
 
@@ -175,6 +216,17 @@ static QueueHandle_t AppSomeip_FindAppQueue(uint16_t service_id) {
     return NULL;
 }
 
+static void AppSomeip_EnqueueRx(QueueHandle_t dst_queue, const AppSomeipRxMsg *rx_msg) {
+    AppSomeipRxMsg dropped_msg;
+
+    if(dst_queue == NULL || rx_msg == NULL) return;
+
+    if(xQueueSend(dst_queue, rx_msg, 0) == pdPASS) return;
+
+    (void)xQueueReceive(dst_queue, &dropped_msg, 0);
+    (void)xQueueSend(dst_queue, rx_msg, 0);
+}
+
 BaseType_t AppSomeip_Recv(QueueHandle_t rx_queue, AppSomeipRxMsg* rx_msg) {
     if(rx_queue == NULL || rx_msg == NULL) return pdFAIL;
 
@@ -184,7 +236,7 @@ BaseType_t AppSomeip_Recv(QueueHandle_t rx_queue, AppSomeipRxMsg* rx_msg) {
 BaseType_t AppSomeip_SendRequest(LightSomeipPacket* request_packet) {
     AppSomeipTxMsg tx_msg;
 
-    if(request_packet == NULL || g_tx_queue == NULL) return pdFAIL;
+    if(request_packet == NULL || g_tx_queue == NULL || g_someip_ready != pdPASS) return pdFAIL;
 
     memset(&tx_msg, 0, sizeof(tx_msg));
     tx_msg.msg_type = APP_SOMEIP_TX_REQUEST;
@@ -196,7 +248,7 @@ BaseType_t AppSomeip_SendRequest(LightSomeipPacket* request_packet) {
 BaseType_t AppSomeip_SendResponse(const AppSomeipRxMsg* request_msg, LightSomeipPacket* response_packet) {
     AppSomeipTxMsg tx_msg;
 
-    if(request_msg == NULL || response_packet == NULL || g_tx_queue == NULL) return pdFAIL;
+    if(request_msg == NULL || response_packet == NULL || g_tx_queue == NULL || g_someip_ready != pdPASS) return pdFAIL;
     if(request_msg->packet.message_type != SOMEIP_MSGTYPE_REQUEST) return pdFAIL;
 
     memset(&tx_msg, 0, sizeof(tx_msg));
@@ -210,7 +262,7 @@ BaseType_t AppSomeip_SendResponse(const AppSomeipRxMsg* request_msg, LightSomeip
 BaseType_t AppSomeip_SendEvent(LightSomeipPacket* event_packet, const LightSomeipEndpoint* dst_endpoint) {
     AppSomeipTxMsg tx_msg;
 
-    if(event_packet == NULL || dst_endpoint == NULL || g_tx_queue == NULL) return pdFAIL;
+    if(event_packet == NULL || dst_endpoint == NULL || g_tx_queue == NULL || g_someip_ready != pdPASS) return pdFAIL;
 
     memset(&tx_msg, 0, sizeof(tx_msg));
     tx_msg.msg_type = APP_SOMEIP_TX_EVENT;

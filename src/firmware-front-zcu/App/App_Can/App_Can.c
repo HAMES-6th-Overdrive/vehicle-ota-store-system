@@ -87,9 +87,11 @@ typedef struct AppCanTpChannelConfig {
     TickType_t n_cr_timeout_ticks;             /* 0이면 기본값 사용 */
 } AppCanTpChannelConfig;
 
-#define APP_CAN_RAW_RX_OBJECT_COUNT           (1u)
+#define APP_CAN_RAW_RX_OBJECT_COUNT           (3u)
 static const AppCanRawRxObjectConfig g_appCanRawRxObjectConfigs[APP_CAN_MAX_RAW_RX_OBJECTS] = {
-    { 0x200u, 4u, 1u }
+    { 0x200u, 4u, 1u },
+    { 0x201u, 4u, 1u },
+    { 0x202u, 4u, 1u }
 };
 static const uint8_t g_appCanRawRxObjectConfigCount = APP_CAN_RAW_RX_OBJECT_COUNT;
 
@@ -246,6 +248,7 @@ static void AppCan_SetStandardFilter(uint8_t filter_number, uint32_t can_id, Ifx
 
 static void AppCan_ReadUpdatedRxBuffers(void);
 static void AppCan_ReadRxBuffer(uint8_t rx_buffer_number);
+static BaseType_t AppCan_TryStoreLatestFromIsr(const AppCanFrame *frame);
 static void AppCan_QueueRxFrameFromIsr(const AppCanFrame *frame);
 
 static BaseType_t AppCan_EnqueueTxMessage(uint32_t id, const uint8_t *data, uint8_t length, uint8_t is_fd);
@@ -934,7 +937,40 @@ static void AppCan_ReadRxBuffer(uint8_t rx_buffer_number)
     }
 
     AppCan_CopyWordsToBytes(frame.data, g_can_hw.rx_data, frame.length);
+
+    if(AppCan_TryStoreLatestFromIsr(&frame) == pdPASS)
+    {
+        return;
+    }
+
     AppCan_QueueRxFrameFromIsr(&frame);
+}
+
+static BaseType_t AppCan_TryStoreLatestFromIsr(const AppCanFrame *frame)
+{
+    AppCanRawRxObject *object;
+
+    if(frame == NULL)
+    {
+        return pdFAIL;
+    }
+
+    if(AppCan_TpFindByRxCanId(frame->id) != NULL)
+    {
+        return pdFAIL;
+    }
+
+    object = AppCan_FindRawRxObjectById(frame->id);
+    if((object == NULL) || (object->config.keep_latest == 0u) || (object->queue != NULL))
+    {
+        return pdFAIL;
+    }
+
+    object->latest_frame = *frame;
+    object->has_latest_frame = 1u;
+    g_rx_stored_count++;
+
+    return pdPASS;
 }
 
 static void AppCan_QueueRxFrameFromIsr(const AppCanFrame *frame)
