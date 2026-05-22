@@ -57,6 +57,8 @@ IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 static void init_led_pin(const IfxPort_Pin *pin);
 static void task_app_led_500ms(void *arg);
+static void app_assert_pass(BaseType_t result);
+static void app_panic_loop(void);
 
 void core0_main(void)
 {
@@ -73,22 +75,20 @@ void core0_main(void)
     IfxCpu_waitEvent(&g_cpuSyncEvent, 1);
     
     /* 스케줄링 정상 확인용 LED 토글 태스크 등록 */
-    xTaskCreate(task_app_led_500ms, "APP LED", configMINIMAL_STACK_SIZE, NULL, 0, NULL);
+    app_assert_pass(xTaskCreate(task_app_led_500ms, "APP LED", configMINIMAL_STACK_SIZE, NULL, 0, NULL));
 
-    AppCan_Start();
-    AppAebService_Start();
-    AppDriveService_Start();
-    AppEth_Start();
-    AppSomeip_Start();
-    AppInfoService_Start();
-    AppSensorService_Start();
+    app_assert_pass(AppCan_Start());
+    app_assert_pass(AppAebService_Start());
+    app_assert_pass(AppDriveService_Start());
+    app_assert_pass(AppEth_Start());
+    app_assert_pass(AppSomeip_Start());
+    app_assert_pass(AppInfoService_Start());
+    app_assert_pass(AppSensorService_Start());
 
     /* Start the scheduler */
     vTaskStartScheduler();
-    
-    while (1)
-    {
-    }
+
+    app_panic_loop();
 }
 
 /* Required FreeRTOS callback, called in case of a stack overflow.
@@ -97,10 +97,15 @@ void core0_main(void)
  */
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
-    while (1)
-    {
-        __nop();
-    }
+    (void)xTask;
+    (void)pcTaskName;
+
+    app_panic_loop();
+}
+
+void vApplicationMallocFailedHook(void)
+{
+    app_panic_loop();
 }
 
 static void init_led_pin(const IfxPort_Pin *pin)
@@ -119,5 +124,21 @@ static void task_app_led_500ms(void *arg)
     {
         IfxPort_togglePin(LED_500MS_PIN->port, LED_500MS_PIN->pinIndex);
         vTaskDelay(pdMS_TO_TICKS(500U));
+    }
+}
+
+static void app_assert_pass(BaseType_t result)
+{
+    if(result != pdPASS)
+    {
+        app_panic_loop();
+    }
+}
+
+static void app_panic_loop(void)
+{
+    while (1)
+    {
+        __nop();
     }
 }
