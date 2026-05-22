@@ -128,6 +128,16 @@ typedef struct
  */
 void initMcmcan(void);
 
+void CanIf_TxService1ms(void);
+
+/**
+ * @brief RX ISR에서 복사해둔 OTA Request를 main/scheduler context에서 처리
+ *
+ * Sensor ECU:
+ *  - RX ISR에서는 0x600 payload를 pending buffer에 복사만 한다.
+ *  - 실제 UdsOta_onRequest() 호출은 이 함수에서 수행한다.
+ */
+void CanIf_ProcessPendingOtaRequest(void);
 
 /**
  * @brief Classical CAN 메시지 송신

@@ -43,7 +43,7 @@
 #endif
 
 #ifndef UDS_APP_START_ADDR
-#define UDS_APP_START_ADDR            0x80040000U
+#define UDS_APP_START_ADDR            0x80320000UL
 #endif
 
 /* ============================================================

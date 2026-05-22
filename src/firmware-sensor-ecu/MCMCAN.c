@@ -4,13 +4,12 @@
  *
  * Sensor ECU 역할:
  *  - Node0 RX:
- *      0x080 VehicleState  -> RxBuffer0
- *      0x600 OtaRequest    -> RxBuffer1
+ *      0x600 UDS OTA Request -> RxBuffer0
  *
  *  - Node0 TX:
  *      0x201 TofDistanceData, FEATURE_TOF_SENSOR == 1U일 때만 Scheduler에서 송신
  *      0x202 SpeedData
- *      0x601 OtaResponse
+ *      0x601 UDS OTA Response
  *
  *  - Node2 RX:
  *      FEATURE_TOF_SENSOR == 1U일 때만 사용
@@ -24,8 +23,11 @@
  *
  * 변경 사항:
  *  - IMU 센서를 사용하지 않으므로 0x200 ImuData 송신 기능 제거.
- *  - Sensor ECU 센서값 송신은 Gear P/D와 무관하게 항상 허용한다.
- *  - Gear P/D는 OTA 허용 여부 판단에만 사용한다.
+ *  - Sensor ECU 센서값 송신은 VehicleState/Gear와 무관하게 항상 수행한다.
+ *  - OTA 허용 조건도 Gear P/D와 무관하게 항상 허용한다.
+ *  - Sensor ECU는 더 이상 0x080 VehicleState를 수신/처리하지 않는다.
+ *  - 0x600 UDS OTA Request는 RX ISR에서 직접 처리하지 않고 pending buffer에 복사한다.
+ *  - 실제 UdsOta_onRequest() 호출은 CanIf_ProcessPendingOtaRequest()에서 수행한다.
  *********************************************************************************************************************/
 
 #include "MCMCAN.h"
@@ -45,6 +47,12 @@
 
 McmcanType g_mcmcan;
 
+#define CAN_TX_STUCK_LIMIT_1MS   20U
+
+static volatile uint32_t g_txInProgressTicks = 0U;
+
+volatile uint32_t testTxServiceCount = 0U;
+volatile uint32_t testTxStuckRecoverCount = 0U;
 
 /* ============================================================
    Node0 RX 디버깅용 변수
@@ -53,27 +61,32 @@ McmcanType g_mcmcan;
 volatile uint32_t testLastRxId = 0U;
 
 /*
- * 0x080 VehicleState로 받은 현재 Gear 상태.
- * Sensor ECU에서는 센서 송신 제한용이 아니라 OTA 허용 조건 판단용으로만 사용한다.
+ * Legacy debug only.
+ *
+ * 현재 구조에서는 ZCU가 Gear 정보를 보내지 않고,
+ * Sensor ECU도 Gear 상태를 OTA 허용 조건으로 사용하지 않는다.
+ *
+ * 혹시 다른 파일/Watch 설정에서 참조 중일 수 있어 변수만 남겨둔다.
+ * 로직에서는 사용하지 않는다.
  */
-volatile uint8_t testGearState = GEAR_STATE_P;
+volatile uint8_t testGearState = 0U;
 
 /*
  * 기존 Scheduler.c 호환용 변수.
  *
  * 현재 구조:
- *   센서값은 Gear P/D와 무관하게 항상 송신해야 하므로 항상 TRUE 유지.
- *
- * 나중에 Scheduler.c에서 이 변수를 완전히 제거해도 된다.
+ *   센서값은 VehicleState/Gear와 무관하게 항상 송신한다.
+ *   따라서 항상 TRUE로 유지한다.
  */
 volatile boolean testSensorReadEnabled = TRUE;
 
 /*
  * OTA 허용 여부.
  *
- * 정책:
- *   Gear P일 때만 OTA 허용
- *   Gear D일 때는 OTA 비허용
+ * 현재 구조:
+ *   ZCU는 Gear 정보를 알지 않는다.
+ *   사용자가 HPC에서 Store 구매/다운로드를 승인하면 OTA를 수행한다.
+ *   따라서 Sensor ECU는 Gear 조건 없이 OTA를 항상 허용한다.
  */
 volatile boolean testOtaAllowed = TRUE;
 
@@ -87,6 +100,23 @@ volatile uint16_t testOtaDataLength     = 0U;
 volatile uint32_t testOtaTotalCrc32     = 0U;
 volatile uint8_t  testOtaApplyRequest   = 0U;
 volatile uint8_t  testOtaResetType      = 0U;
+
+
+/* ============================================================
+   OTA Request Pending Buffer
+   - RX ISR 경로에서는 0x600 payload를 복사만 한다.
+   - 실제 UdsOta_onRequest()는 main/scheduler context에서 처리한다.
+   ============================================================ */
+
+static volatile boolean g_otaRxPending = FALSE;
+static volatile uint8_t g_otaRxPendingLength = 0U;
+static uint8_t g_otaRxPendingData[CANFD_MAX_DLC];
+
+volatile uint32_t testOtaRxPendingSetCount = 0U;
+volatile uint32_t testOtaRxPendingProcessCount = 0U;
+volatile uint32_t testOtaRxPendingDropCount = 0U;
+volatile uint8_t  testOtaRxPendingLastSid = 0U;
+volatile uint8_t  testOtaRxPendingLastLength = 0U;
 
 
 /* ============================================================
@@ -216,8 +246,6 @@ static void readNode0RxBuffer(IfxCan_RxBufferId rxBufferId);
 static void readTofCanNode2Fifo0(void);
 #endif
 
-static void handleVehicleStateRx(const uint8_t *data, uint8_t length);
-
 static CanTxResult_t enqueueTxMessage(uint32 id,
                                       const uint8_t *data,
                                       uint8 length,
@@ -255,6 +283,8 @@ void canIsrTxHandler(void)
                                    IfxCan_Interrupt_transmissionCompleted);
 
     g_txInProgress = FALSE;
+    g_txInProgressTicks = 0U;
+
     testTxSentCount++;
 
     tryStartNextTx();
@@ -265,8 +295,7 @@ void canIsrTxHandler(void)
  * @brief Node0 CAN RX interrupt handler
  *
  * Dedicated RX Buffer 사용:
- *  - RxBuffer0: 0x080 VehicleState
- *  - RxBuffer1: 0x600 OtaRequest
+ *  - RxBuffer0: 0x600 UDS OTA Request
  */
 void canIsrRxHandler(void)
 {
@@ -314,21 +343,29 @@ void tofCanNode2RxIsrHandler(void)
 void initMcmcan(void)
 {
     /*
-     * 센서값 송신은 Gear와 무관하게 항상 허용.
-     * OTA는 기본적으로 P 상태에서만 허용하는 정책.
+     * 현재 구조:
+     *  - Sensor ECU는 Gear/VehicleState를 사용하지 않는다.
+     *  - 센서값 송신은 항상 허용한다.
+     *  - OTA도 HPC 사용자 승인 기반으로 수행되므로 Sensor ECU 내부에서는 항상 허용한다.
      */
-    testGearState = GEAR_STATE_P;
+    testGearState = 0U;
     testSensorReadEnabled = TRUE;
     testOtaAllowed = TRUE;
 
+    g_otaRxPending = FALSE;
+    g_otaRxPendingLength = 0U;
+    memset(g_otaRxPendingData, 0, sizeof(g_otaRxPendingData));
+
     UdsOta_init();
-    UdsOta_setProgrammingAllowed(testOtaAllowed);
+    UdsOta_setProgrammingAllowed(TRUE);
 
     initCanTransceiver();
     initCanModule();
 
     /*
      * Node0: ZCU 통신용
+     *  - RX: 0x600 UDS OTA Request
+     *  - TX: 0x201 / 0x202 / 0x601
      */
     initCanNode0();
     initSensorNode0RxFilters();
@@ -419,7 +456,7 @@ CanTxResult_t CanIf_sendSpeedData(const SpeedData_t *msg)
 
 
 /**
- * @brief Sensor ECU 송신: 0x601 OtaResponse
+ * @brief Sensor ECU 송신: 0x601 UDS OTA Response
  */
 CanTxResult_t CanIf_sendOtaResponse(const uint8_t *payload, uint16_t length)
 {
@@ -436,6 +473,12 @@ CanTxResult_t CanIf_sendOtaResponse(const uint8_t *payload, uint16_t length)
  * @brief Sensor ECU RX 메시지 처리
  *
  * Node0에서 ZCU가 보낸 메시지를 처리한다.
+ *
+ * 주의:
+ *  - 이 함수는 RX ISR 경로에서 호출될 수 있다.
+ *  - 따라서 긴 작업, Flash erase/write/CRC 계산은 여기서 직접 수행하지 않는다.
+ *  - OTA Request는 pending buffer에 복사만 하고,
+ *    실제 UdsOta_onRequest()는 CanIf_ProcessPendingOtaRequest()에서 수행한다.
  */
 void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 {
@@ -443,20 +486,35 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 
     switch(id)
     {
-        case CAN_ID_VEHICLE_STATE:
-        {
-            handleVehicleStateRx(data, length);
-            break;
-        }
-
         case CAN_ID_OTA_REQUEST:
         {
-            if ((data != NULL_PTR) && (length > 0U))
+            if((data != NULL_PTR) && (length > 0U) && (length <= CANFD_MAX_DLC))
             {
                 testOtaServiceId = data[0];
+
+                /*
+                 * 아직 이전 OTA request가 처리되지 않았는데 새 request가 오면
+                 * overwrite하고 drop count를 증가시킨다.
+                 *
+                 * 정상 UDS 흐름에서는 ZCU가 응답을 기다린 뒤 다음 요청을 보내므로
+                 * 이 count가 증가하면 비정상 속도/처리 지연을 의심하면 된다.
+                 */
+                if(g_otaRxPending == TRUE)
+                {
+                    testOtaRxPendingDropCount++;
+                }
+
+                memset(g_otaRxPendingData, 0, sizeof(g_otaRxPendingData));
+                memcpy(g_otaRxPendingData, data, length);
+
+                g_otaRxPendingLength = length;
+                g_otaRxPending = TRUE;
+
+                testOtaRxPendingLastSid = data[0];
+                testOtaRxPendingLastLength = length;
+                testOtaRxPendingSetCount++;
             }
 
-            UdsOta_onRequest(data, length);
             break;
         }
 
@@ -468,48 +526,53 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
 }
 
 
-/*********************************************************************************************************************/
-/*--------------------------------------------RX handler functions---------------------------------------------------*/
-/*********************************************************************************************************************/
-
 /**
- * @brief 0x080 VehicleState 수신 처리
+ * @brief Pending OTA Request 처리
  *
- * Sensor ECU 센서 측정/송신은 Gear P/D와 무관하게 계속 수행한다.
- * Gear 상태는 OTA 허용 조건 판단에만 사용한다.
+ * RX ISR에서 복사해둔 0x600 UDS Request를 main/scheduler context에서 처리한다.
+ *
+ * 호출 위치:
+ *  - Scheduler 1ms task
+ *  - 또는 main while loop
+ *
+ * 목적:
+ *  - UdsOta_onRequest() 내부에서 Flash erase/write/CRC 같은 긴 작업이 수행되더라도
+ *    RX ISR 안에서 실행되지 않도록 분리한다.
  */
-static void handleVehicleStateRx(const uint8_t *data, uint8_t length)
+void CanIf_ProcessPendingOtaRequest(void)
 {
-    VehicleState_Frame_t frame;
+    uint8_t localData[CANFD_MAX_DLC];
+    uint8_t localLength;
+    boolean interruptState;
 
-    if((data == NULL_PTR) || (length < CAN_DLC_VEHICLE_STATE))
+    interruptState = IfxCpu_disableInterrupts();
+
+    if(g_otaRxPending == FALSE)
     {
+        IfxCpu_restoreInterrupts(interruptState);
         return;
     }
 
-    memcpy(frame.raw, data, CAN_DLC_VEHICLE_STATE);
+    localLength = g_otaRxPendingLength;
 
-    testGearState = frame.fields.gearState;
-
-    /*
-     * 센서값 송신은 Gear P/D와 무관하게 항상 허용.
-     * 기존 Scheduler.c 호환을 위해 TRUE로 유지한다.
-     */
-    testSensorReadEnabled = TRUE;
-
-    /*
-     * OTA는 P단에서만 허용.
-     */
-    if(frame.fields.gearState == GEAR_STATE_P)
+    if(localLength > CANFD_MAX_DLC)
     {
-        testOtaAllowed = TRUE;
-    }
-    else
-    {
-        testOtaAllowed = FALSE;
+        localLength = CANFD_MAX_DLC;
     }
 
-    UdsOta_setProgrammingAllowed(testOtaAllowed);
+    memset(localData, 0, sizeof(localData));
+    memcpy(localData, g_otaRxPendingData, localLength);
+
+    g_otaRxPending = FALSE;
+    g_otaRxPendingLength = 0U;
+
+    IfxCpu_restoreInterrupts(interruptState);
+
+    if(localLength > 0U)
+    {
+        UdsOta_onRequest(localData, localLength);
+        testOtaRxPendingProcessCount++;
+    }
 }
 
 
@@ -600,11 +663,11 @@ static void initCanNode0(void)
     g_mcmcan.canNodeConfig.rxConfig.rxBufferDataFieldSize = IfxCan_DataFieldSize_64;
 
     /*
-     * Standard ID filter 2개:
-     * 0x080, 0x600
+     * Standard ID filter 1개:
+     * 0x600 UDS OTA Request
      */
     g_mcmcan.canNodeConfig.filterConfig.messageIdLength = IfxCan_MessageIdLength_standard;
-    g_mcmcan.canNodeConfig.filterConfig.standardListSize = 2U;
+    g_mcmcan.canNodeConfig.filterConfig.standardListSize = 1U;
     g_mcmcan.canNodeConfig.filterConfig.extendedListSize = 0U;
 
     g_mcmcan.canNodeConfig.filterConfig.standardFilterForNonMatchingFrames =
@@ -644,13 +707,11 @@ static void initCanNode0(void)
 /**
  * @brief Sensor ECU Node0 RX Filter 설정
  *
- * 0x080 VehicleState -> RxBuffer0
- * 0x600 OtaRequest   -> RxBuffer1
+ * 0x600 UDS OTA Request -> RxBuffer0
  */
 static void initSensorNode0RxFilters(void)
 {
-    setNode0StandardFilter(0U, CAN_ID_VEHICLE_STATE, IfxCan_RxBufferId_0);
-    setNode0StandardFilter(1U, CAN_ID_OTA_REQUEST,   IfxCan_RxBufferId_1);
+    setNode0StandardFilter(0U, CAN_ID_OTA_REQUEST, IfxCan_RxBufferId_0);
 }
 
 
@@ -787,7 +848,7 @@ static void setNode0MessageRamLayout(void)
     g_mcmcan.canNodeConfig.messageRAM.rxFifo1StartAddress = 0x100U;
 
     /*
-     * Node0 Dedicated RxBuffer0~1
+     * Node0 Dedicated RxBuffer0
      */
     g_mcmcan.canNodeConfig.messageRAM.rxBuffersStartAddress = 0x180U;
 
@@ -836,18 +897,13 @@ static void setNode2MessageRamLayout(void)
 
 
 /**
- * @brief Node0 새 데이터가 들어온 RX Buffer들을 모두 읽음
+ * @brief Node0 새 데이터가 들어온 RX Buffer를 읽음
  */
 static void readNode0UpdatedRxBuffers(void)
 {
     if(IfxCan_Node_isRxBufferNewDataUpdated(g_mcmcan.canNode.node, IfxCan_RxBufferId_0))
     {
         readNode0RxBuffer(IfxCan_RxBufferId_0);
-    }
-
-    if(IfxCan_Node_isRxBufferNewDataUpdated(g_mcmcan.canNode.node, IfxCan_RxBufferId_1))
-    {
-        readNode0RxBuffer(IfxCan_RxBufferId_1);
     }
 }
 
@@ -1034,6 +1090,7 @@ static void tryStartNextTx(void)
 
     g_txQueueCount--;
     g_txInProgress = TRUE;
+    g_txInProgressTicks = 0U;
 }
 
 
@@ -1168,4 +1225,42 @@ static void copyBytesToWords(uint32 *wordBuffer, const uint8_t *byteBuffer, uint
 static void copyWordsToBytes(uint8_t *byteBuffer, const uint32 *wordBuffer, uint16_t length)
 {
     memcpy(byteBuffer, (const uint8_t *)wordBuffer, length);
+}
+
+
+void CanIf_TxService1ms(void)
+{
+    boolean interruptState;
+
+    interruptState = IfxCpu_disableInterrupts();
+
+    testTxServiceCount++;
+
+    if(g_txInProgress == TRUE)
+    {
+        g_txInProgressTicks++;
+
+        /*
+         * Classical/CAN FD 송신이 20ms 동안 완료 안 되는 경우는 비정상.
+         * TX complete ISR 누락 또는 CAN HW stuck 진단/회복용.
+         *
+         * 주의:
+         *  - 현재는 SW flag만 회복한다.
+         *  - 실제 HW TX cancel/flush는 수행하지 않는다.
+         */
+        if(g_txInProgressTicks >= CAN_TX_STUCK_LIMIT_1MS)
+        {
+            g_txInProgress = FALSE;
+            g_txInProgressTicks = 0U;
+            testTxStuckRecoverCount++;
+        }
+    }
+    else
+    {
+        g_txInProgressTicks = 0U;
+    }
+
+    tryStartNextTx();
+
+    IfxCpu_restoreInterrupts(interruptState);
 }

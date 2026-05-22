@@ -1,6 +1,24 @@
 /**********************************************************************************************************************
  * \file FlashOta.c
- * \brief Sensor ECU Flash OTA Core
+ * \brief Sensor ECU Flash OTA Core - Bank B download only version
+ *
+ * 1차 목표:
+ *  - 새 firmware를 Active App 영역이 아니라 Bank B / Inactive Slot에 저장한다.
+ *  - Bank B 영역에 erase / write / read-back verify / CRC32 검증을 수행한다.
+ *  - 아직 UCB_SWAP, App jump, 실행 Slot 전환은 수행하지 않는다.
+ *
+ * 주소 정책:
+ *  - Slot A / Active App 후보:
+ *      Cached    : 0x80040000
+ *      Noncached : 0xA0040000
+ *
+ *  - Slot B / Bank B / OTA Download Target:
+ *      Cached    : 0x80300000
+ *      Noncached : 0xA0300000
+ *
+ * 전제:
+ *  - FlashOta.h에 FLASH_OTA_DOWNLOAD_TARGET_ADDR_C / NC가 정의되어 있어야 한다.
+ *  - can_type_def.h의 UDS_APP_START_ADDR도 0x80300000U로 맞춰야 한다.
  *********************************************************************************************************************/
 
 #include "FlashOta.h"
@@ -18,8 +36,24 @@
 
 static FlashOta_DebugInfo_t g_flashOtaDebug;
 
+/*
+ * 1차 단계에서는 "jump pending"이라는 이름은 유지하지만,
+ * 실제로 App jump는 하지 않는다.
+ *
+ * 나중에 UCB_SWAP / Bank B Activation 단계에서
+ * 이 부분을 SOTA_SwapToGroupB() 흐름으로 교체할 예정.
+ */
 static volatile boolean g_jumpPending = FALSE;
 static volatile uint8_t g_pendingResetType = 0U;
+
+/*
+ * 실제 erase / write / CRC 대상 주소.
+ *
+ * 현재 1차 목표에서는 항상 Bank B / Inactive Slot을 대상으로 한다.
+ */
+static uint32_t g_downloadTargetAddrC  = FLASH_OTA_DOWNLOAD_TARGET_ADDR_C;
+static uint32_t g_downloadTargetAddrNC = FLASH_OTA_DOWNLOAD_TARGET_ADDR_NC;
+
 
 /* ============================================================
    Private prototypes
@@ -31,12 +65,15 @@ static uint32_t crc32Update(uint32_t crc, uint8_t data);
 static uint32_t crc32FlashOriginalSize(void);
 static void delayMs(uint32 ms);
 
+static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr);
+
 #pragma section code "cpu0_psram"
 
 static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount);
 static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data);
 
 #pragma section code restore
+
 
 /* ============================================================
    Public API
@@ -47,22 +84,39 @@ void FlashOta_Init(void)
     FlashOta_Reset();
 }
 
+
 void FlashOta_Reset(void)
 {
     memset(&g_flashOtaDebug, 0, sizeof(g_flashOtaDebug));
     g_flashOtaDebug.verifyFailOffset = 0xFFFFFFFFU;
 
+    /*
+     * 1차 목표에서는 OTA download target을 항상 Bank B로 둔다.
+     */
+    g_downloadTargetAddrC  = FLASH_OTA_DOWNLOAD_TARGET_ADDR_C;
+    g_downloadTargetAddrNC = FLASH_OTA_DOWNLOAD_TARGET_ADDR_NC;
+
     g_jumpPending = FALSE;
     g_pendingResetType = 0U;
 }
+
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
 {
     uint32_t sectorCount;
 
+    /*
+     * 새 다운로드 시작 시 FlashOta 내부 상태 초기화.
+     */
     FlashOta_Reset();
 
-    if (targetAddress != FLASH_OTA_APP_START_ADDR_C)
+    /*
+     * Dual Slot / Bank B OTA 1차 목표:
+     *   Active App 영역이 아니라 Bank B / Inactive Slot에만 다운로드를 허용한다.
+     *
+     * 따라서 ZCU의 RequestDownload targetAddress도 0x80300000이어야 한다.
+     */
+    if (targetAddress != FLASH_OTA_DOWNLOAD_TARGET_ADDR_C)
     {
         return FALSE;
     }
@@ -74,20 +128,25 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
 
     sectorCount = calcSectorCount(firmwareSize);
 
-    g_flashOtaDebug.targetAddress = targetAddress;
+    g_downloadTargetAddrC  = FLASH_OTA_DOWNLOAD_TARGET_ADDR_C;
+    g_downloadTargetAddrNC = FLASH_OTA_DOWNLOAD_TARGET_ADDR_NC;
+
+    g_flashOtaDebug.targetAddress = g_downloadTargetAddrC;
     g_flashOtaDebug.firmwareSize = firmwareSize;
     g_flashOtaDebug.receivedBytes = 0U;
     g_flashOtaDebug.started = TRUE;
 
     /*
-     * Flash command는 uncached 주소 사용.
+     * Bank B 영역 erase.
+     * Flash command는 non-cached 주소를 사용한다.
      */
-    pflashEraseSectorsPspr(FLASH_OTA_APP_START_ADDR_NC, sectorCount);
+    pflashEraseSectorsPspr(g_downloadTargetAddrNC, sectorCount);
 
     g_flashOtaDebug.eraseCount = sectorCount;
 
     return TRUE;
 }
+
 
 boolean FlashOta_WriteBlock(uint16_t blockIndex,
                             const uint8_t *data,
@@ -110,6 +169,9 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
         return FALSE;
     }
 
+    /*
+     * blockIndex 기준 32-byte page offset 계산.
+     */
     offset = ((uint32_t)blockIndex * FLASH_OTA_PAGE_SIZE);
 
     if (offset >= g_flashOtaDebug.firmwareSize)
@@ -126,11 +188,21 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
 
     /*
      * 마지막 block이 32바이트보다 작을 수 있으므로 나머지는 0xFF padding.
+     *
+     * CRC는 나중에 firmwareSize만큼만 계산하므로,
+     * 이 padding은 CRC에 포함되지 않는다.
      */
     memset(page, 0xFF, sizeof(page));
     memcpy(page, data, length);
 
-    targetAddrNc = FLASH_OTA_APP_START_ADDR_NC + offset;
+    /*
+     * Bank B non-cached 주소에 write.
+     *
+     * blockIndex 0 -> 0xA0300000
+     * blockIndex 1 -> 0xA0300020
+     * blockIndex 2 -> 0xA0300040
+     */
+    targetAddrNc = g_downloadTargetAddrNC + offset;
 
     words[0] = readU32Le(&page[0]);
     words[1] = readU32Le(&page[4]);
@@ -141,10 +213,14 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
     words[6] = readU32Le(&page[24]);
     words[7] = readU32Le(&page[28]);
 
+    /* Trap 발생 전 주소 확인용 */
+    g_flashOtaDebug.lastWriteAddress = targetAddrNc;
+
     pflashWritePagePspr(targetAddrNc, words);
 
     /*
      * Read-back verify.
+     * non-cached 주소로 실제 Flash에 쓰인 값을 확인한다.
      */
     readPtr = (volatile const uint8 *)targetAddrNc;
 
@@ -166,6 +242,7 @@ boolean FlashOta_WriteBlock(uint16_t blockIndex,
     return TRUE;
 }
 
+
 boolean FlashOta_EndTransfer(void)
 {
     if (g_flashOtaDebug.started == FALSE)
@@ -183,6 +260,7 @@ boolean FlashOta_EndTransfer(void)
     return TRUE;
 }
 
+
 boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
                             uint32_t *calculatedCrc32)
 {
@@ -193,6 +271,10 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
         return FALSE;
     }
 
+    /*
+     * Bank B에 저장된 firmware를 firmwareSize만큼만 CRC 계산한다.
+     * 마지막 page의 0xFF padding은 CRC에 포함하지 않는다.
+     */
     crc = crc32FlashOriginalSize();
 
     g_flashOtaDebug.expectedCrc32 = expectedCrc32;
@@ -213,6 +295,7 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
     return FALSE;
 }
 
+
 boolean FlashOta_RequestJumpToApp(uint8_t resetType)
 {
     if (g_flashOtaDebug.crcVerified == FALSE)
@@ -220,45 +303,56 @@ boolean FlashOta_RequestJumpToApp(uint8_t resetType)
         return FALSE;
     }
 
+    /*
+     * 1차 단계에서는 실제 App jump / UCB_SWAP을 수행하지 않는다.
+     *
+     * 의미:
+     *   - Bank B image는 CRC 검증 완료
+     *   - 실행 전환은 아직 하지 않음
+     *   - 나중에 P단 + 사용자 OK 시 SOTA_SwapToGroupB()를 붙일 예정
+     */
     g_pendingResetType = resetType;
     g_jumpPending = TRUE;
 
     return TRUE;
 }
 
+
 boolean FlashOta_IsJumpPending(void)
 {
     return g_jumpPending;
 }
 
+
 void FlashOta_Service(void)
 {
-    typedef void (*AppEntryFunc)(void);
-
-    AppEntryFunc appEntry;
-
     if (g_jumpPending == FALSE)
     {
         return;
     }
 
     /*
-     * 0x601: 51 01 응답이 실제 CAN으로 나갈 시간을 조금 준다.
-     * 이 동안 인터럽트는 켜져 있어야 TX complete가 처리될 수 있음.
+     * 기존 Single Slot OTA에서는 여기서 0x80040000으로 jump했다.
+     *
+     * 하지만 현재는 Dual Slot / Bank B OTA 1차 단계이므로
+     * 절대 active app으로 jump하지 않는다.
+     *
+     * 지금 목표:
+     *   - Bank B write
+     *   - Bank B CRC 검증
+     *   - 실행 전환은 아직 보류
+     *
+     * 나중에 이 위치 또는 별도 Activation 함수에서
+     * SOTA_SwapToGroupB() / system reset 흐름을 연결한다.
      */
     delayMs(200U);
 
+    (void)g_pendingResetType;
+
     g_jumpPending = FALSE;
-
-    IfxCpu_disableInterrupts();
-
-    appEntry = (AppEntryFunc)FLASH_OTA_APP_START_ADDR_C;
-    appEntry();
-
-    while (1)
-    {
-    }
+    g_pendingResetType = 0U;
 }
+
 
 void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info)
 {
@@ -267,6 +361,7 @@ void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info)
         memcpy(info, &g_flashOtaDebug, sizeof(FlashOta_DebugInfo_t));
     }
 }
+
 
 /* ============================================================
    Private functions
@@ -279,6 +374,7 @@ static uint32_t readU32Le(const uint8_t *p)
            ((uint32_t)p[2] << 16) |
            ((uint32_t)p[3] << 24);
 }
+
 
 static uint32_t calcSectorCount(uint32_t firmwareSize)
 {
@@ -299,6 +395,7 @@ static uint32_t calcSectorCount(uint32_t firmwareSize)
     return count;
 }
 
+
 static uint32_t crc32Update(uint32_t crc, uint8_t data)
 {
     crc ^= data;
@@ -318,9 +415,10 @@ static uint32_t crc32Update(uint32_t crc, uint8_t data)
     return crc;
 }
 
+
 static uint32_t crc32FlashOriginalSize(void)
 {
-    volatile const uint8 *flashPtr = (volatile const uint8 *)FLASH_OTA_APP_START_ADDR_NC;
+    volatile const uint8 *flashPtr = (volatile const uint8 *)g_downloadTargetAddrNC;
     uint32_t crc = 0xFFFFFFFFU;
 
     for (uint32_t i = 0U; i < g_flashOtaDebug.firmwareSize; i++)
@@ -331,12 +429,42 @@ static uint32_t crc32FlashOriginalSize(void)
     return crc ^ 0xFFFFFFFFU;
 }
 
+
 static void delayMs(uint32 ms)
 {
     Ifx_STM *stm = &MODULE_STM0;
     uint32 ticks = IfxStm_getTicksFromMilliseconds(stm, ms);
 
     IfxStm_waitTicks(stm, ticks);
+}
+
+static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr)
+{
+    uint32 offset;
+    uint32 slotBOffset;
+
+    /*
+     * Cached / Non-cached 주소 모두 하위 offset 기준으로 판단한다.
+     *
+     * 예:
+     *   0x80300000 & 0x0FFFFFFF = 0x00300000
+     *   0xA0300000 & 0x0FFFFFFF = 0x00300000
+     */
+    offset = addr & 0x0FFFFFFFU;
+
+    /*
+     * Slot B / Bank B 시작 offset.
+     * FLASH_OTA_SLOT_B_START_ADDR_C = 0x80300000 기준이면
+     * slotBOffset = 0x00300000
+     */
+    slotBOffset = FLASH_OTA_SLOT_B_START_ADDR_C & 0x0FFFFFFFU;
+
+    if (offset >= slotBOffset)
+    {
+        return IfxFlash_FlashType_P1;
+    }
+
+    return IfxFlash_FlashType_P0;
 }
 
 /* ============================================================
@@ -348,6 +476,9 @@ static void delayMs(uint32 ms)
 static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount)
 {
     uint16 safetyWdtPassword;
+    IfxFlash_FlashType flashType;
+
+    flashType = getPFlashTypeFromAddress(sectorAddr);
 
     safetyWdtPassword = IfxScuWdt_getSafetyWatchdogPasswordInline();
 
@@ -355,15 +486,19 @@ static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount)
     IfxFlash_eraseMultipleSectors(sectorAddr, sectorCount);
     IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
 
-    IfxFlash_waitUnbusy(0, IfxFlash_FlashType_P0);
+    IfxFlash_waitUnbusy(0, flashType);
 }
+
 
 static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data)
 {
     uint16 safetyWdtPassword;
+    IfxFlash_FlashType flashType;
+
+    flashType = getPFlashTypeFromAddress(pageAddr);
 
     IfxFlash_enterPageMode(pageAddr);
-    IfxFlash_waitUnbusy(0, IfxFlash_FlashType_P0);
+    IfxFlash_waitUnbusy(0, flashType);
 
     /*
      * PFLASH page = 32 bytes = 8 words
@@ -379,7 +514,7 @@ static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data)
     IfxFlash_writePage(pageAddr);
     IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
 
-    IfxFlash_waitUnbusy(0, IfxFlash_FlashType_P0);
+    IfxFlash_waitUnbusy(0, flashType);
 }
 
 #pragma section code restore

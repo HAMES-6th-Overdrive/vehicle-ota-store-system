@@ -8,12 +8,15 @@
  *
  * 주기:
  *  - 1ms   : HallSensor D0 pulse count update
+ *            + Pending OTA Request 처리
+ *            + CAN TX service
  *  - 10ms  : 0x201 TofDistanceData, FEATURE_TOF_SENSOR == 1U일 때만
  *  - 100ms : 0x202 SpeedData
  *
  * 정책:
  *  - Sensor ECU의 센서값 송신은 Gear P/D와 무관하게 계속 수행한다.
- *  - Gear P/D는 OTA 허용 조건 판단에만 사용한다.
+ *  - OTA 허용 조건도 Gear P/D와 무관하게 항상 허용한다.
+ *  - ZCU는 Gear 정보를 전달하지 않는다.
  *  - IMU 센서는 현재 프로젝트에서 사용하지 않는다.
  *********************************************************************************************************************/
 
@@ -39,7 +42,7 @@
 /*-------------------------------------------------Static variables--------------------------------------------------*/
 /*********************************************************************************************************************/
 
-#define USE_FIXED_SPEED_FOR_AEB_TEST    1U
+#define USE_FIXED_SPEED_FOR_AEB_TEST    0U
 #define TEST_FIXED_SPEED_KMH_X100       630U
 
 static uint32               s_tick = 0U;
@@ -69,25 +72,6 @@ volatile uint32 scheduler1msOverrunCount = 0U;
 volatile uint32 scheduler10msOverrunCount = 0U;
 volatile uint32 scheduler100msOverrunCount = 0U;
 
-/* TOF Watch 확인용 */
-volatile uint16_t mainTofDistanceMm = 0U;
-volatile uint32_t mainTofRaw24 = 0U;
-volatile uint32_t mainTofLastCanId = 0U;
-volatile boolean  mainTofValid = FALSE;
-volatile uint32_t mainTofUpdateCount = 0U;
-
-/* HallSensor Watch 확인용 */
-volatile uint32_t mainHallPulseCount = 0U;
-volatile uint16_t mainHallVehicleSpeed = 0U;
-volatile uint32_t mainHallUpdateCount = 0U;
-
-/* 주기 송신 Watch 확인용 */
-volatile uint32_t mainTxTofCount = 0U;
-volatile uint32_t mainTxSpeedCount = 0U;
-
-volatile uint32_t mainTxTofFailCount = 0U;
-volatile uint32_t mainTxSpeedFailCount = 0U;
-
 /*********************************************************************************************************************/
 /*------------------------------------------------Private prototypes-------------------------------------------------*/
 /*********************************************************************************************************************/
@@ -103,7 +87,7 @@ static void task_100ms(void);
 static void sendTofDistanceData10ms(void);
 #endif
 
-static void sendSpeedData100ms(void);
+static void sendSpeedData100ms(uint16_t vehicleSpeed);
 
 /*********************************************************************************************************************/
 /*------------------------------------------------ISR Definition-----------------------------------------------------*/
@@ -170,22 +154,6 @@ void initScheduler(void)
     scheduler1msOverrunCount = 0U;
     scheduler10msOverrunCount = 0U;
     scheduler100msOverrunCount = 0U;
-
-    mainTofDistanceMm = 0U;
-    mainTofRaw24 = 0U;
-    mainTofLastCanId = 0U;
-    mainTofValid = FALSE;
-    mainTofUpdateCount = 0U;
-
-    mainHallPulseCount = 0U;
-    mainHallVehicleSpeed = 0U;
-    mainHallUpdateCount = 0U;
-
-    mainTxTofCount = 0U;
-    mainTxSpeedCount = 0U;
-
-    mainTxTofFailCount = 0U;
-    mainTxSpeedFailCount = 0U;
 
     IfxStm_initCompareConfig(&s_stmConfig);
 
@@ -272,17 +240,29 @@ static boolean Scheduler_consumeTaskFlag(volatile boolean *flag)
  *
  * 처리:
  *  - HallSensor D0 pulse count update
+ *  - RX ISR에서 pending 처리한 0x600 OTA Request 처리
+ *  - CAN TX Queue 보조 service
  *
  * 주의:
- *  - CAN 송신은 여기서 하지 않음.
+ *  - 1ms task에서는 주기 CAN 데이터 송신은 하지 않음.
  *  - 홀센서 펄스를 놓치지 않기 위해 1ms마다 GPIO를 읽음.
+ *  - OTA Request는 RX ISR 안에서 직접 처리하지 않고 여기서 처리한다.
+ *  - CanIf_TxService1ms()는 TX complete ISR 누락/stuck 진단 및 복구 보조용.
  */
 static void task_1ms(void)
 {
     HallSensor_update1ms();
 
-    mainHallUpdateCount++;
-    mainHallPulseCount = HallSensor_getPulseCount();
+    /*
+     * RX ISR에서 복사해둔 0x600 UDS OTA Request를
+     * ISR 밖 main/scheduler context에서 처리한다.
+     *
+     * UdsOta_onRequest() 내부에서 Flash erase/write/CRC 같은 작업이 수행될 수 있으므로
+     * CAN RX ISR 안에서 직접 호출하지 않는다.
+     */
+    CanIf_ProcessPendingOtaRequest();
+
+    CanIf_TxService1ms();
 }
 
 /**
@@ -323,6 +303,8 @@ static void task_10ms(void)
  */
 static void task_100ms(void)
 {
+    uint16_t vehicleSpeed;
+
 #if (USE_FIXED_SPEED_FOR_AEB_TEST == 1U)
 
     /*
@@ -332,7 +314,7 @@ static void task_100ms(void)
      * 단위:
      * 630 = 6.30 km/h
      */
-    mainHallVehicleSpeed = TEST_FIXED_SPEED_KMH_X100;
+    vehicleSpeed = TEST_FIXED_SPEED_KMH_X100;
 
 #else
 
@@ -340,11 +322,11 @@ static void task_100ms(void)
      * 실제 홀센서 기반 속도 계산
      */
     HallSensor_calcSpeed100ms();
-    mainHallVehicleSpeed = HallSensor_getVehicleSpeed();
+    vehicleSpeed = HallSensor_getVehicleSpeed();
 
 #endif
 
-    sendSpeedData100ms();
+    sendSpeedData100ms(vehicleSpeed);
 }
 
 /*********************************************************************************************************************/
@@ -362,35 +344,25 @@ static void task_100ms(void)
 static void sendTofDistanceData10ms(void)
 {
     TofDistanceData_t tofData;
+    boolean tofValid;
 
     if(TofSensor_hasNewData() == TRUE)
     {
-        mainTofUpdateCount++;
         TofSensor_clearNewDataFlag();
     }
 
-    mainTofDistanceMm = TofSensor_getDistanceMm();
-    mainTofRaw24      = TofSensor_getRaw24();
-    mainTofLastCanId  = TofSensor_getLastCanId();
-    mainTofValid      = TofSensor_isValid();
+    tofValid = TofSensor_isValid();
 
-    if(mainTofValid == TRUE)
+    if(tofValid == TRUE)
     {
-        tofData.distanceMm = mainTofDistanceMm;
+        tofData.distanceMm = TofSensor_getDistanceMm();
     }
     else
     {
         tofData.distanceMm = TOF_DISTANCE_INVALID_MM;
     }
 
-    if(CanIf_sendTofDistanceData(&tofData) == CAN_TX_OK)
-    {
-        mainTxTofCount++;
-    }
-    else
-    {
-        mainTxTofFailCount++;
-    }
+    (void)CanIf_sendTofDistanceData(&tofData);
 }
 
 #endif /* FEATURE_TOF_SENSOR */
@@ -398,18 +370,11 @@ static void sendTofDistanceData10ms(void)
 /**
  * @brief 0x202 SpeedData 송신
  */
-static void sendSpeedData100ms(void)
+static void sendSpeedData100ms(uint16_t vehicleSpeed)
 {
     SpeedData_t speedData;
 
-    speedData.vehicleSpeed = mainHallVehicleSpeed;
+    speedData.vehicleSpeed = vehicleSpeed;
 
-    if(CanIf_sendSpeedData(&speedData) == CAN_TX_OK)
-    {
-        mainTxSpeedCount++;
-    }
-    else
-    {
-        mainTxSpeedFailCount++;
-    }
+    (void)CanIf_sendSpeedData(&speedData);
 }

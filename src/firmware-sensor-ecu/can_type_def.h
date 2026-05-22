@@ -246,8 +246,18 @@ enum {
 #define UDS_DOWNLOAD_DATA_FORMAT_ID    0x00U
 #define UDS_DOWNLOAD_ADDR_LEN_FORMAT   0x44U
 
-/* Application update target */
-#define UDS_APP_START_ADDR             0x80040000U
+/*
+ * OTA Download Target
+ *
+ * 기존 Single Slot OTA:
+ *   0x80040000 = Active App 영역
+ *
+ * Dual Slot / Bank B OTA:
+ *   0x80300000 = Inactive Bank B 영역
+ *
+ * 주행 중에는 이 영역에 새 firmware를 저장하고 CRC 검증까지만 수행한다.
+ */
+#define UDS_APP_START_ADDR 0x80320000U
 
 /* UDS Request 최소 길이 */
 #define UDS_REQ_LEN_DIAGNOSTIC_SESSION_CONTROL   2U
