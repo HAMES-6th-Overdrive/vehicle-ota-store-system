@@ -55,8 +55,13 @@ typedef void (*AppFunc)(void);
 
 static void Bootloader_JumpToApp(uint32 appAddr)
 {
+    __dsync();
+    __isync();    
+
     AppFunc app = (AppFunc)appAddr;
     app();
+
+    while (1);
 }
 
 void Bootloader_Main(void)

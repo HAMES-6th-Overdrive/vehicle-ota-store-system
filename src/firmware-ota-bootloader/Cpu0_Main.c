@@ -28,24 +28,38 @@
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
 #include "Ifx_Cfg_Ssw.h"
+#include "sota_ucb.h"
 #include "ota_flash.h"
 #include <stdio.h>
 #include "IfxAsclin_Asc.h"
+#include "IfxAsclin_reg.h"
 #include "UART_VCOM.h"
 
-
-/*
- #include "UART_VCOM.h"
- extern IfxAsclin_Asc g_ascPrint;
+boolean g_isGroupBActive = FALSE;
+extern IfxAsclin_Asc g_ascPrint;
 
 int _write(int fd, char *buf, int len)
 {
-    Ifx_SizeT count = len;
-    IfxAsclin_Asc_write(&g_ascPrint, buf, &count, TIME_INFINITE);
-    return count;
-}*/
+    (void)fd;
 
-// IfxCpu_syncEvent g_cpuSyncEvent = 0;
+    if ((buf == NULL_PTR) || (len <= 0))
+        return 0;
+
+    for (int i = 0; i < len; i++)
+    {
+        uint32 timeout = 1000000u;
+
+        while ((IfxAsclin_getTxFifoFillLevel(&MODULE_ASCLIN0) >= 16u) && (timeout-- > 0u))
+            __nop();
+
+        if (timeout == 0u)
+            break;
+
+        IfxAsclin_writeTxData(&MODULE_ASCLIN0, (uint16)(uint8)buf[i]);
+    }
+
+    return len;
+}
 
 IFX_ALIGN(4) IfxCpu_syncEvent cpuSyncEvent = 0;
 extern void Bootloader_Main(void);
@@ -55,7 +69,7 @@ void core2_main(void) { while(1) {} }
 
 void core0_main(void)
 {
-    //IfxCpu_enableInterrupts();
+    // IfxCpu_enableInterrupts();
 
     /* !!WATCHDOG0 AND SAFETY WATCHDOG ARE DISABLED HERE!!
      * Enable the watchdogs and service them periodically if it is required
@@ -68,9 +82,13 @@ void core0_main(void)
     IfxCpu_waitEvent(&cpuSyncEvent, 1);
 
     init_UART();
-    printf("Core0 Main\n");
 
+    g_isGroupBActive = SOTA_IsGroupBActive();
+    g_isGroupBActive ? printf("Bootloader Bank B!\r\n") : printf("Bootloader Bank A!\r\n");    
+
+    for (int i = 0; i < 10000000; ++i);
     Bootloader_Main();
+
     while(1)
     {
     }

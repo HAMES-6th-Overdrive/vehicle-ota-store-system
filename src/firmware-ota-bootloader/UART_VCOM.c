@@ -57,12 +57,6 @@ uint8 g_ascTxBufferPrint[ASC_TX_BUFFER_SIZE + sizeof(Ifx_Fifo) + 8];            
 /*********************************************************************************************************************/
 /*---------------------------------------------Function Implementations----------------------------------------------*/
 /*********************************************************************************************************************/
-IFX_INTERRUPT(asclin0_Tx_ISR, 0, INTPRIO_ASCLIN0_TX);                         /* Adding the Interrupt Service Routine */
-
-void asclin0_Tx_ISR(void)
-{
-    IfxAsclin_Asc_isrTransmit(&g_ascPrint);
-}
 
 void init_UART(void)
 {
@@ -74,7 +68,7 @@ void init_UART(void)
     ascConfig.baudrate.baudrate = SERIAL_BAUDRATE;
 
     /* ISR priorities and interrupt target */
-    ascConfig.interrupt.txPriority = INTPRIO_ASCLIN0_TX;
+    ascConfig.interrupt.txPriority = 0;
     ascConfig.interrupt.typeOfService = IfxCpu_Irq_getTos(IfxCpu_getCoreIndex());
 
     /* FIFO configuration */
