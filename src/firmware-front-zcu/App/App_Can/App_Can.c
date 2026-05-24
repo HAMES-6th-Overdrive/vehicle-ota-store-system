@@ -87,11 +87,13 @@ typedef struct AppCanTpChannelConfig {
     TickType_t n_cr_timeout_ticks;             /* 0이면 기본값 사용 */
 } AppCanTpChannelConfig;
 
-#define APP_CAN_RAW_RX_OBJECT_COUNT           (3u)
+#define APP_CAN_RAW_RX_OBJECT_COUNT           (5u)
 static const AppCanRawRxObjectConfig g_appCanRawRxObjectConfigs[APP_CAN_MAX_RAW_RX_OBJECTS] = {
     { 0x200u, 4u, 1u },
     { 0x201u, 4u, 1u },
-    { 0x202u, 4u, 1u }
+    { 0x202u, 4u, 1u },
+    { 0x702u, 2u, 1u },
+    { 0x703u, 2u, 1u }
 };
 static const uint8_t g_appCanRawRxObjectConfigCount = APP_CAN_RAW_RX_OBJECT_COUNT;
 
