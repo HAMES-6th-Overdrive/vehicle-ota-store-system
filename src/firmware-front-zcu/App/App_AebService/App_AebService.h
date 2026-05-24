@@ -13,5 +13,6 @@ typedef enum AppAebServiceStopCmd {
 BaseType_t AppAebService_Start(void);
 QueueHandle_t AppAebService_GetSomeipRxQueue(void);
 AppAebServiceStopCmd AppAebService_GetStopCmd(void);
+const char *AppAebService_GetVersion(void);
 
 #endif /* APP_AEBSERVICE_H */

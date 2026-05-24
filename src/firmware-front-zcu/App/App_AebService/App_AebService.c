@@ -9,10 +9,16 @@
 #define APP_AEBSERVICE_TASK_PERIOD_MS        (10u)
 #define APP_AEBSERVICE_SOMEIP_RX_QUEUE_SIZE  (8u)
 #define APP_AEBSERVICE_SOMEIP_DRAIN_LIMIT    (4u)
+#define APP_AEBSERVICE_VERSION               "1.0.0"
 
 #define APP_AEBSERVICE_SERVICE_ID            (0x0006u)
+#define APP_AEBSERVICE_STATUS_METHOD         (0x1001u)
+#define APP_AEBSERVICE_CONTROL_METHOD        (0x1002u)
 #define APP_AEBSERVICE_EVENT_AEB_TRIGGERED   (0x2001u)
 #define APP_AEBSERVICE_EVENT_PAYLOAD_LEN     (0u)
+#define APP_AEBSERVICE_STATUS_PAYLOAD_LEN    (1u)
+#define APP_AEBSERVICE_CONTROL_CMD_OFF       (0x00u)
+#define APP_AEBSERVICE_CONTROL_CMD_ON        (0x01u)
 #define APP_AEBSERVICE_VEHICLE_COMPUTER_IP   "192.168.10.1"
 #define APP_AEBSERVICE_VEHICLE_COMPUTER_PORT (30500u)
 
@@ -42,6 +48,7 @@
 static uint16_t g_aeb_distance_mm = APP_AEB_TOF_DISTANCE_INVALID_MM;
 static uint16_t g_aeb_speed_kmh_x100 = 0u;
 static AppAebServiceStopCmd g_aeb_stop_cmd = APP_AEBSERVICE_STOP_CMD_GO;
+static BaseType_t g_aeb_enabled = pdTRUE;
 static BaseType_t g_aeb_active = pdFALSE;
 static BaseType_t g_aeb_trigger_event_pending = pdFALSE;
 static uint8_t g_aeb_release_count = 0u;
@@ -56,6 +63,9 @@ static void AppAebService_ReadLatestSensorFrames(void);
 static void AppAebService_UpdateFromFrame(const AppCanFrame *frame);
 static void AppAebService_ProcessSomeip(void);
 static void AppAebService_HandleSomeipMessage(const AppSomeipRxMsg *rx_msg);
+static void AppAebService_HandleServiceMethod(const AppSomeipRxMsg *rx_msg);
+static void AppAebService_SendStatusResponse(const AppSomeipRxMsg *request_msg);
+static void AppAebService_HandleControlMethod(const AppSomeipRxMsg *request_msg);
 static void AppAebService_Evaluate(void);
 static void AppAebService_SendPendingEvents(void);
 static BaseType_t AppAebService_SendAebTriggeredEvent(void);
@@ -96,6 +106,11 @@ AppAebServiceStopCmd AppAebService_GetStopCmd(void)
     return stop_cmd;
 }
 
+const char *AppAebService_GetVersion(void)
+{
+    return APP_AEBSERVICE_VERSION;
+}
+
 static void AppAebService_SetSensorData(uint16_t distance_mm, uint16_t speed_kmh_x100)
 {
     taskENTER_CRITICAL();
@@ -123,6 +138,7 @@ static BaseType_t AppAebService_Init(void)
     g_aeb_distance_mm = APP_AEB_TOF_DISTANCE_INVALID_MM;
     g_aeb_speed_kmh_x100 = 0u;
     g_aeb_stop_cmd = APP_AEBSERVICE_STOP_CMD_GO;
+    g_aeb_enabled = pdTRUE;
     g_aeb_active = pdFALSE;
     g_aeb_trigger_event_pending = pdFALSE;
     g_aeb_release_count = 0u;
@@ -219,6 +235,12 @@ static void AppAebService_HandleSomeipMessage(const AppSomeipRxMsg *rx_msg)
         return;
     }
 
+    if(rx_msg->packet.service_id == APP_AEBSERVICE_SERVICE_ID)
+    {
+        AppAebService_HandleServiceMethod(rx_msg);
+        return;
+    }
+
     if(rx_msg->packet.service_id != APP_AEBSERVICE_SENSOR_SERVICE_ID)
     {
         return;
@@ -259,6 +281,82 @@ static void AppAebService_HandleSomeipMessage(const AppSomeipRxMsg *rx_msg)
     AppAebService_SetSensorData(distance_mm, speed_kmh_x100);
 }
 
+static void AppAebService_HandleServiceMethod(const AppSomeipRxMsg *rx_msg)
+{
+    if(rx_msg->packet.method_id == APP_AEBSERVICE_STATUS_METHOD)
+    {
+        AppAebService_SendStatusResponse(rx_msg);
+    }
+    else if(rx_msg->packet.method_id == APP_AEBSERVICE_CONTROL_METHOD)
+    {
+        AppAebService_HandleControlMethod(rx_msg);
+    }
+    else
+    {
+        /* No action required */
+    }
+}
+
+static void AppAebService_SendStatusResponse(const AppSomeipRxMsg *request_msg)
+{
+    LightSomeipPacket response_packet;
+    uint8_t payload[APP_AEBSERVICE_STATUS_PAYLOAD_LEN];
+
+    taskENTER_CRITICAL();
+    payload[0] = (g_aeb_enabled == pdTRUE) ? APP_AEBSERVICE_CONTROL_CMD_ON : APP_AEBSERVICE_CONTROL_CMD_OFF;
+    taskEXIT_CRITICAL();
+
+    if(light_someip_packet_init(&response_packet,
+                                request_msg->packet.service_id,
+                                request_msg->packet.method_id,
+                                payload,
+                                APP_AEBSERVICE_STATUS_PAYLOAD_LEN) != SOMEIP_OK)
+    {
+        return;
+    }
+
+    (void)AppSomeip_SendResponse(request_msg, &response_packet);
+}
+
+static void AppAebService_HandleControlMethod(const AppSomeipRxMsg *request_msg)
+{
+    LightSomeipPacket response_packet;
+    uint8_t cmd;
+
+    if(request_msg->packet.payload_len < 1u)
+    {
+        return;
+    }
+
+    cmd = request_msg->packet.payload_arr[0];
+    if((cmd != APP_AEBSERVICE_CONTROL_CMD_OFF) && (cmd != APP_AEBSERVICE_CONTROL_CMD_ON))
+    {
+        return;
+    }
+
+    taskENTER_CRITICAL();
+    g_aeb_enabled = (cmd == APP_AEBSERVICE_CONTROL_CMD_ON) ? pdTRUE : pdFALSE;
+    if(g_aeb_enabled != pdTRUE)
+    {
+        g_aeb_active = pdFALSE;
+        g_aeb_trigger_event_pending = pdFALSE;
+        g_aeb_release_count = 0u;
+        g_aeb_stop_cmd = APP_AEBSERVICE_STOP_CMD_GO;
+    }
+    taskEXIT_CRITICAL();
+
+    if(light_someip_packet_init(&response_packet,
+                                request_msg->packet.service_id,
+                                request_msg->packet.method_id,
+                                NULL,
+                                0u) != SOMEIP_OK)
+    {
+        return;
+    }
+
+    (void)AppSomeip_SendResponse(request_msg, &response_packet);
+}
+
 static void AppAebService_Evaluate(void)
 {
     uint16_t distance_mm;
@@ -266,11 +364,24 @@ static void AppAebService_Evaluate(void)
     uint16_t stop_distance_mm;
     uint16_t release_distance_mm;
     AppAebServiceStopCmd stop_cmd;
+    BaseType_t enabled;
 
     taskENTER_CRITICAL();
+    enabled = g_aeb_enabled;
     distance_mm = g_aeb_distance_mm;
     speed_kmh_x100 = g_aeb_speed_kmh_x100;
     taskEXIT_CRITICAL();
+
+    if(enabled != pdTRUE)
+    {
+        taskENTER_CRITICAL();
+        g_aeb_active = pdFALSE;
+        g_aeb_trigger_event_pending = pdFALSE;
+        g_aeb_release_count = 0u;
+        g_aeb_stop_cmd = APP_AEBSERVICE_STOP_CMD_GO;
+        taskEXIT_CRITICAL();
+        return;
+    }
 
     if(speed_kmh_x100 > APP_AEB_MAX_SPEED_KMH_X100)
     {

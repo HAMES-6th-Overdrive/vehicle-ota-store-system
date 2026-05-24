@@ -1,5 +1,6 @@
 #include "App_InfoService.h"
 
+#include "App_AebService/App_AebService.h"
 #include "App_Someip/App_Someip.h"
 #include "someip/light_someip.h"
 #include "task.h"
@@ -10,9 +11,13 @@
 #define APP_INFOSERVICE_RX_QUEUE_SIZE   (8u)
 
 #define APP_INFOSERVICE_SERVICE_ID      (0x0007u)
-#define APP_INFOSERVICE_VERSION_METHOD  (0x1001u)
+#define APP_INFOSERVICE_FRONTZCU_VERSION_METHOD (0x1003u)
+#define APP_INFOSERVICE_AEB_VERSION_METHOD      (0x1004u)
+#define APP_INFOSERVICE_VERSION_PAYLOAD_LENGTH  (10u)
 
 static QueueHandle_t g_info_service_someip_rx_queue;
+
+extern const char *App_GetFrontZcuVersion(void);
 
 static BaseType_t AppInfoService_Init(void);
 static void AppInfoService_Task(void *arg);
@@ -62,7 +67,9 @@ static void AppInfoService_Task(void *arg)
 
 static void AppInfoService_SendVersionResponse(const AppSomeipRxMsg *request_msg)
 {
-    static const uint8_t version_payload[] = "1.0.0";
+    uint8_t version_payload[APP_INFOSERVICE_VERSION_PAYLOAD_LENGTH] = {0u};
+    const char *version_string;
+    size_t version_length;
     LightSomeipPacket response_packet;
 
     if (request_msg == NULL)
@@ -70,18 +77,37 @@ static void AppInfoService_SendVersionResponse(const AppSomeipRxMsg *request_msg
         return;
     }
 
-    if (request_msg->packet.service_id != APP_INFOSERVICE_SERVICE_ID ||
-        request_msg->packet.method_id != APP_INFOSERVICE_VERSION_METHOD)
+    if (request_msg->packet.service_id != APP_INFOSERVICE_SERVICE_ID)
     {
         return;
     }
 
+    if (request_msg->packet.method_id == APP_INFOSERVICE_FRONTZCU_VERSION_METHOD)
+    {
+        version_string = App_GetFrontZcuVersion();
+    }
+    else if (request_msg->packet.method_id == APP_INFOSERVICE_AEB_VERSION_METHOD)
+    {
+        version_string = AppAebService_GetVersion();
+    }
+    else
+    {
+        return;
+    }
+
+    version_length = strlen(version_string);
+    if (version_length > APP_INFOSERVICE_VERSION_PAYLOAD_LENGTH)
+    {
+        version_length = APP_INFOSERVICE_VERSION_PAYLOAD_LENGTH;
+    }
+    (void)memcpy(version_payload, version_string, version_length);
+
     if (light_someip_packet_init(
             &response_packet,
             request_msg->packet.service_id,
-            APP_INFOSERVICE_VERSION_METHOD,
+            request_msg->packet.method_id,
             version_payload,
-            (uint32_t)(sizeof(version_payload) - 1u)) != SOMEIP_OK)
+            APP_INFOSERVICE_VERSION_PAYLOAD_LENGTH) != SOMEIP_OK)
     {
         return;
     }

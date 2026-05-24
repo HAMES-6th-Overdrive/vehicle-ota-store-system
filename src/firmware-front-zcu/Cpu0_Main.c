@@ -54,11 +54,17 @@
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 #define LED_500MS_PIN (&IfxPort_P00_6)
+#define APP_FRONTZCU_VERSION "1.0.0"
 
 static void init_led_pin(const IfxPort_Pin *pin);
 static void task_app_led_500ms(void *arg);
 static void app_assert_pass(BaseType_t result);
 static void app_panic_loop(void);
+
+const char *App_GetFrontZcuVersion(void)
+{
+    return APP_FRONTZCU_VERSION;
+}
 
 void core0_main(void)
 {
