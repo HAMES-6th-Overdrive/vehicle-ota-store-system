@@ -100,6 +100,9 @@ void Bootloader_Main(void)
         {
             OTA_Flash_ClearFlag();
 
+            printf("swap\n");
+            for (int i = 0; i < 10000000; ++i);            
+
             if (isGroupBActive)
                 SOTA_SwapToGroupA();
             else
