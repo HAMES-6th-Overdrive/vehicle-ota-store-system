@@ -1,8 +1,8 @@
 #include "App_Eth.h"
-
+#include "App_DoIP.h"
 #include "Ifx_Lwip.h"
 
-#define APP_ETH_TASK_STACK_SIZE (2048u)
+#define APP_ETH_TASK_STACK_SIZE (8192u)
 #define APP_ETH_TASK_PRIORITY   (2u)
 #define APP_ETH_TASK_PERIOD_MS (1u)
 #define APP_ETH_POWER_ON_DELAY_MS (1000u)
@@ -27,6 +27,7 @@ static BaseType_t AppEth_Init(void)
 
     MAC_ADDR(&mac_addr, 0x02u, 0x00u, 0x00u, 0x00u, 0x00u, 0x01u);
     Ifx_Lwip_init(mac_addr);
+    DoIP_Init();
 
     g_app_eth_ready = pdFALSE;
     g_app_eth_initialized = pdTRUE;

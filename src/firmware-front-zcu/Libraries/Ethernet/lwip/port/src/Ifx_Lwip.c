@@ -379,10 +379,6 @@ void netif_state_changed(struct netif* netif, netif_nsc_reason_t reason, const n
  * The followings are executed: */
 void Ifx_Lwip_init(eth_addr_t ethAddr)
 {
-#ifdef __LWIP_DEBUG__
-    //Init uart for debugging
-    initUART();
-#endif
     ip_addr_t default_ipaddr, default_netmask, default_gw;
     IP4_ADDR(&default_gw, 0,0,0,0);
     IP4_ADDR(&default_ipaddr, 192,168,10,2);

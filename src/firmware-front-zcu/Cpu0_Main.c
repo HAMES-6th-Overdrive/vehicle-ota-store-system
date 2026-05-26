@@ -50,6 +50,11 @@
 #include "App_AebService/App_AebService.h"
 #include "App_DriveService/App_DriveService.h"
 #include "App_SensorService/App_SensorService.h"
+#include "App_DoIP/App_DoIP.h"
+#include "App_Flash/App_Flash.h"
+#include "App_Sota/App_Sota.h"
+#include "App_Uds/App_Uds.h"
+#include "App_Debug/App_Debug.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -90,6 +95,13 @@ void core0_main(void)
     app_assert_pass(AppSomeip_Start());
     app_assert_pass(AppInfoService_Start());
     app_assert_pass(AppSensorService_Start());
+    app_assert_pass(xTaskCreate(AppUds_Task,
+                       "APP UDS",
+                       APP_UDS_TASK_STACK_SIZE,
+                       NULL,
+                       APP_UDS_TASK_PRIORITY,
+                       NULL));
+    AppDebug_Init();    
 
     /* Start the scheduler */
     vTaskStartScheduler();
@@ -105,6 +117,8 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 {
     (void)xTask;
     (void)pcTaskName;
+
+    AppDebug_Print("STACK OVERFLOW: %s", pcTaskName);
 
     app_panic_loop();
 }
@@ -130,6 +144,7 @@ static void task_app_led_500ms(void *arg)
     {
         IfxPort_togglePin(LED_500MS_PIN->port, LED_500MS_PIN->pinIndex);
         vTaskDelay(pdMS_TO_TICKS(500U));
+        // vTaskDelay(pdMS_TO_TICKS(50U));
     }
 }
 

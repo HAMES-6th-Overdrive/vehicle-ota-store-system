@@ -49,6 +49,10 @@
 /*#define LCF_DEFAULT_HOST LCF_CPU1*/
 /*#define LCF_DEFAULT_HOST LCF_CPU2*/
 
+#define LCF_APP_START       0x80020000
+#define LCF_APP_START_NC    0xA0020000
+#define LCF_BOOT_SIZE       0x20000
+
 #define LCF_DSPR2_START 0x50000000
 #define LCF_DSPR2_SIZE  96k
 
@@ -74,21 +78,21 @@
 #define LCF_HEAP1_OFFSET    (LCF_USTACK1_OFFSET - LCF_HEAP_SIZE)
 #define LCF_HEAP2_OFFSET    (LCF_USTACK2_OFFSET - LCF_HEAP_SIZE)
 
-#define LCF_INTVEC0_START 0x802FE000
-#define LCF_INTVEC1_START 0x805FC000
-#define LCF_INTVEC2_START 0x805FE000
+#define LCF_INTVEC0_START   0x802FE000
+#define LCF_INTVEC1_START   0x802FC000
+#define LCF_INTVEC2_START   0x802FA000
 
-#define LCF_TRAPVEC0_START 0x80000100
-#define LCF_TRAPVEC1_START 0x80300000
-#define LCF_TRAPVEC2_START 0x80300100
+#define LCF_TRAPVEC0_START  (LCF_APP_START + 0x0100)
+#define LCF_TRAPVEC1_START  (LCF_APP_START + 0x0200)
+#define LCF_TRAPVEC2_START  (LCF_APP_START + 0x0300)
 
-#define LCF_STARTPTR_CPU0 0x80000000
-#define LCF_STARTPTR_CPU1 0x80300200
-#define LCF_STARTPTR_CPU2 0x80300220
+#define LCF_STARTPTR_CPU0   (LCF_APP_START + 0x0000)
+#define LCF_STARTPTR_CPU1   (LCF_APP_START + 0x0500)
+#define LCF_STARTPTR_CPU2   (LCF_APP_START + 0x0520)
 
-#define LCF_STARTPTR_NC_CPU0 0xA0000000
-#define LCF_STARTPTR_NC_CPU1 0xA0300200
-#define LCF_STARTPTR_NC_CPU2 0xA0300220
+#define LCF_STARTPTR_NC_CPU0 (LCF_APP_START_NC + 0x0000)
+#define LCF_STARTPTR_NC_CPU1 (LCF_APP_START_NC + 0x0500)
+#define LCF_STARTPTR_NC_CPU2 (LCF_APP_START_NC + 0x0520)
 
 #define INTTAB0             (LCF_INTVEC0_START)
 #define INTTAB1             (LCF_INTVEC1_START)
@@ -320,6 +324,11 @@ derivative tc37
 
     section_layout :vtc:linear
     {
+        group boot_reserved (ordered, run_addr=mem:pfls0[0x0000])
+        {
+            reserved "boot_reserved" (size = LCF_BOOT_SIZE);
+        }
+        
         /*Fixed memory Allocations for stack memory and CSA*/
         group (ordered)
         {
@@ -395,7 +404,7 @@ derivative tc37
                     select ".text.start";
                 }
             }
-            group  interface_const (run_addr=mem:pfls0[0x0020])
+            group  interface_const (run_addr=mem:pfls0[LCF_BOOT_SIZE + 0x0020])
             {
                 select "*.interface_const";
             }
@@ -478,7 +487,9 @@ derivative tc37
             "__INTTAB_CPU2" = (LCF_INTVEC2_START);
         }
         
-        /*Fixed memory Allocations for BMHD*/
+        /* Application image must not program BMHD/UCB.
+           BMHD/UCB should be owned by the bootloader project. */
+#if 0
         group (ordered)
         {
             group  bmh_0_orig (run_addr=mem:ucb[0x0000])
@@ -517,6 +528,7 @@ derivative tc37
                 select ".rodata.bmhd_3_copy";
             }
         }
+#endif
     }
         
     /*Near Abbsolute Addressable Data Sections*/
@@ -650,10 +662,10 @@ derivative tc37
         /*Relative A1 Addressable Const, selectable by toolchain*/
         /*Small constant sections, No option given for CPU specific user sections to make generated code portable across Cpus*/
 #        if LCF_DEFAULT_HOST == LCF_CPU2
-        group  a1 (ordered, align = 4, run_addr=mem:pfls1)
+        group  a1 (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU1
-        group  a1 (ordered, align = 4, run_addr=mem:pfls1)
+        group  a1 (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU0
         group  a1 (ordered, align = 4, run_addr=mem:pfls0)
@@ -676,10 +688,10 @@ derivative tc37
 
         /*Relative A8 Addressable Const, selectable with patterns and user defined sections*/
 #        if LCF_DEFAULT_HOST == LCF_CPU2
-        group  a8 (ordered, align = 4, run_addr=mem:pfls1)
+        group  a8 (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU1
-        group  a8 (ordered, align = 4, run_addr=mem:pfls1)
+        group  a8 (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU0
         group  a8 (ordered, align = 4, run_addr=mem:pfls0)
@@ -814,13 +826,13 @@ derivative tc37
                 select ".rodata.Cpu0_Main.*";
                 select "(.rodata.rodata_cpu0|.rodata.rodata_cpu0.*)";
             }
-            group (ordered, align = 4, run_addr=mem:pfls1)
+            group (ordered, align = 4, run_addr=mem:pfls0)
             {
                 select ".rodata.Cpu1_Main.*";
                 select ".rodata.Ifx_Ssw_Tc1.*";
                 select "(.rodata.rodata_cpu1|.rodata.rodata_cpu1.*)";
             }
-            group (ordered, align = 4, run_addr=mem:pfls1)
+            group (ordered, align = 4, run_addr=mem:pfls0)
             {
                 select ".rodata.Ifx_Ssw_Tc2.*";
                 select ".rodata.Cpu2_Main.*";
@@ -830,10 +842,10 @@ derivative tc37
 
         /*Far Const Sections, selectable by toolchain*/
 #        if LCF_DEFAULT_HOST == LCF_CPU2
-        group (ordered, align = 4, run_addr=mem:pfls1)
+        group (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU1
-        group (ordered, align = 4, run_addr=mem:pfls1)
+        group (ordered, align = 4, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU0
         group (ordered, align = 4, run_addr=mem:pfls0)
@@ -890,13 +902,13 @@ derivative tc37
                     select ".text.CompilerTasking.Ifx_C_Init";
                     select "(.text.text_cpu0|.text.text_cpu0.*)";
                 }
-                group (ordered, align = 4, run_addr=mem:pfls1)
+                group (ordered, align = 4, run_addr=mem:pfls0)
                 {
                     select ".text.Ifx_Ssw_Tc1.*";
                     select ".text.Cpu1_Main.*";
                     select "(.text.text_cpu1|.text.text_cpu1.*)";
                 }
-                group (ordered, align = 4, run_addr=mem:pfls1)
+                group (ordered, align = 4, run_addr=mem:pfls0)
                 {
                     select ".text.Ifx_Ssw_Tc2.*";
                     select ".text.Cpu2_Main.*";
@@ -907,10 +919,10 @@ derivative tc37
         
         /*Code Sections, selectable by toolchain*/
 #        if LCF_DEFAULT_HOST == LCF_CPU2
-        group (ordered, run_addr=mem:pfls1)
+        group (ordered, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU1
-        group (ordered, run_addr=mem:pfls1)
+        group (ordered, run_addr=mem:pfls0)
 #        endif
 #        if LCF_DEFAULT_HOST == LCF_CPU0
         group (ordered, run_addr=mem:pfls0)
