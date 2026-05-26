@@ -154,8 +154,8 @@ enum {
  *  2. RequestDownload          0x34
  *  3. TransferData             0x36
  *  4. RequestTransferExit      0x37
- *  5. RoutineControl           0x31
- *  6. ECUReset                 0x11
+5. RequestTransferExit에서 CRC 확인 및 OTA flag 저장
+6. Reset 후 Bootloader가 SOTA/UCB_SWAP 수행
  */
 
 /* UDS Service ID */

@@ -7,6 +7,11 @@
  *  - UDS Positive / Negative Response 생성
  *  - Download / TransferData / TransferExit / RoutineControl / Reset 상태 관리
  *
+ * 현재 수정 방향:
+ *  - RequestDownload(0x34)에서 client가 보낸 memoryAddress는 직접 신뢰하지 않는다.
+ *  - 현재 단독 검증 단계에서는 Slot A에서 실행 중이라고 가정하고 Slot B(0x80320000)에 write한다.
+ *  - 최종 통합 시에는 SOTA_IsGroupBActive() 결과에 따라 targetAddress를 선택한다.
+ *
  * Cleanup 개선 내용:
  *  - 새 Programming Session(0x10 02) 진입 시 이전 OTA 완료/오류 context 정리
  *  - 새 RequestDownload(0x34) 시작 직전 FlashOta 내부 상태 정리
@@ -365,7 +370,8 @@ static void handleDiagnosticSessionControl(const uint8_t *payload, uint8_t lengt
 
 static void handleRequestDownload(const uint8_t *payload, uint8_t length)
 {
-    uint32_t memoryAddress;
+    uint32_t requestedMemoryAddress;
+    uint32_t targetMemoryAddress;
     uint32_t memorySize;
     uint8_t responsePayload[3];
 
@@ -378,6 +384,18 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      * B2      AddressAndLengthFormatIdentifier = 0x44
      * B3~B6   MemoryAddress, little endian
      * B7~B10  MemorySize, little endian
+     *
+     * 현재 팀 구조:
+     *  - client가 보내는 MemoryAddress는 직접 신뢰하지 않는다.
+     *  - ECU 내부에서 현재 active group 기준으로 inactive slot을 선택한다.
+     *
+     * 현재 단독 검증 단계:
+     *  - Slot A에서 실행 중이라고 가정
+     *  - target = Slot B(0x80320000)
+     *
+     * 최종 통합 시:
+     *  - if (SOTA_IsGroupBActive()) target = Slot A(0x80020000)
+     *  - else                       target = Slot B(0x80320000)
      */
 
     /*
@@ -413,11 +431,22 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
         return;
     }
 
-    memoryAddress = readU32Le(&payload[3]);
+    requestedMemoryAddress = readU32Le(&payload[3]);
     memorySize = readU32Le(&payload[7]);
 
-    if ((memoryAddress != UDS_OTA_APP_START_ADDR) ||
-        (memorySize == 0U) ||
+    /*
+     * 현재는 client address를 사용하지 않는다.
+     * 단, 디버깅 시 확인 가능하도록 변수는 읽어둔다.
+     */
+    (void)requestedMemoryAddress;
+
+    /*
+     * 현재 검증 단계에서는 A active로 가정하고 Slot B에 다운로드한다.
+     * 나중에 SOTA_IsGroupBActive() 연결 시 이 한 줄만 runtime 선택으로 교체하면 된다.
+     */
+    targetMemoryAddress = FLASH_OTA_SLOT_B_START_ADDR_C;
+
+    if ((memorySize == 0U) ||
         (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
@@ -431,7 +460,7 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      */
     resetDownloadContextOnly();
 
-    if (Target_BeginDownload(memoryAddress, memorySize) == FALSE)
+    if (Target_BeginDownload(targetMemoryAddress, memorySize) == FALSE)
     {
         sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
                              UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
@@ -439,7 +468,7 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
     }
 
     g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
-    g_udsOtaDebug.memoryAddress = memoryAddress;
+    g_udsOtaDebug.memoryAddress = targetMemoryAddress;
     g_udsOtaDebug.firmwareSize = memorySize;
     g_udsOtaDebug.receivedBytes = 0U;
     g_udsOtaDebug.expectedBlockIndex = 0U;
@@ -695,6 +724,10 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
 
     g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
 
+    /*
+     * 현재 단계에서는 실제 jump하지 않는다.
+     * FlashOta_RequestJumpToApp()도 pending만 세우고 직접 jump하지 않는다.
+     */
     (void)Target_EcuReset(resetType);
 }
 

@@ -63,10 +63,14 @@
 #define UDS_OTA_APP_START_ADDR        UDS_APP_START_ADDR
 
 /*
- * 실험/안전용 최대 이미지 크기.
- * 실제 Sensor ECU Application 크기에 맞춰 나중에 조정 가능.
+ * A/B Slot 기준 최대 이미지 크기.
+ *
+ * Slot A: 0x80020000 ~ 0x802FFFFF
+ * Slot B: 0x80320000 ~ 0x805FFFFF
+ *
+ * Slot size = 0x2E0000 bytes
  */
-#define UDS_OTA_MAX_IMAGE_SIZE        0x30000U
+#define UDS_OTA_MAX_IMAGE_SIZE        0x002E0000U
 
 /* ============================================================
    UDS OTA 상태
