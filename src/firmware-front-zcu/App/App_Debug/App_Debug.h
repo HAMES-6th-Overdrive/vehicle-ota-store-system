@@ -9,6 +9,7 @@ extern "C" {
 
 void AppDebug_Init(void);
 void AppDebug_Print(const char *format, ...);
+void AppDebug_Print_C1(const char *format, ...);
 
 #ifdef __cplusplus
 }

@@ -29,7 +29,7 @@
 /*********************************************************************************************************************/
 /*-----------------------------------------------------Includes------------------------------------------------------*/
 #include "App_DoIP.h"
-#include "App_Uds.h"
+#include "App_DiagCore1/App_DiagCore1.h"
 #include <string.h>
 #include "lwip/opt.h"
 #include "lwip/tcp.h"
@@ -248,6 +248,9 @@ static void DoIP_HandleDiagMessage(tcpPcb *tpcb, DoIPSession *ds,
     if (ds->state != DOIP_STATE_ROUTING_ACTIVE)
         return;
 
+    if (payloadLen < 4u)
+        return;
+
     /* payload[0~1]: 소스(tester), payload[2~3]: 타겟(ZCU) */
     uint16 srcAddr    = ((uint16)payload[0] << 8) | payload[1];
     uint16 targetAddr = ((uint16)payload[2] << 8) | payload[3];
@@ -265,19 +268,30 @@ static void DoIP_HandleDiagMessage(tcpPcb *tpcb, DoIPSession *ds,
     ack[12] = 0x00;
     DoIP_SendRaw(tpcb, ack, sizeof(ack));
 
-    /* ── UDS 처리 ─────────────────────────────────────────── */
+    /* ── UDS 처리는 Core1 diagnostic worker로 전달 ───────── */
     uint8  *udsData   = payload + 4;
-    uint16  udsLen    = (uint16)(payloadLen - 4);
-    uint8   udsRes[256];
+    uint16  udsLen    = (uint16)(payloadLen - 4u);
+    uint8   udsRes[APP_DIAG_CORE1_TX_BUF_SIZE];
     uint16  udsResLen = 0;
 
-    UDS_HandleService(udsData, udsLen, udsRes, &udsResLen);
+    if (AppDiagCore1_RequestBlocking(udsData,
+                                     udsLen,
+                                     udsRes,
+                                     &udsResLen,
+                                     APP_DIAG_CORE1_DEFAULT_TIMEOUT_MS) != TRUE)
+    {
+        /* Core1 worker timeout/busy 시 UDS generalReject 응답 */
+        udsRes[0] = 0x7Fu;
+        udsRes[1] = (udsLen > 0u) ? udsData[0] : 0x00u;
+        udsRes[2] = 0x10u;
+        udsResLen = 3u;
+    }
 
     /* ── UDS 응답을 DoIP로 감싸서 전송: ZCU → Tester ─────── */
     if (udsResLen > 0)
     {
         uint32 diagLen = 4 + udsResLen;
-        uint8  res[DOIP_HEADER_LEN + 4 + 256];
+        uint8  res[DOIP_HEADER_LEN + 4 + APP_DIAG_CORE1_TX_BUF_SIZE];
 
         DoIP_BuildHeader(res, DOIP_DIAG_MESSAGE, diagLen);
         res[8]  = (DOIP_ZCU_ADDR >> 8) & 0xFF;  /* source = ZCU   */

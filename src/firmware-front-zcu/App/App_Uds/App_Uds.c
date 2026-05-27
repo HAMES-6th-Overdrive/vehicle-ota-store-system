@@ -30,6 +30,7 @@
 /*-----------------------------------------------------Includes------------------------------------------------------*/
 #include "App_Uds.h"
 #include "App_Flash.h"
+#include "App_Debug/App_Core1Debug.h"
 #include "IfxScuRcu.h"
 #include <string.h>
 #include "lwip/opt.h"
@@ -91,15 +92,26 @@ static uint16 UDS_TransferExit      (uint8 *rx, uint16 rxLen, uint8 *tx);
 
 /*********************************************************************************************************************/
 /*---------------------------------------------Function Implementations----------------------------------------------*/
+boolean AppUds_ConsumeResetPending(void)
+{
+    boolean pending = g_crcPending;
+
+    if (pending == TRUE)
+    {
+        g_crcPending = FALSE;
+    }
+
+    return pending;
+}
+
 void AppUds_Task(void *arg)
 {
     (void)arg;
 
     for(;;)
     {
-        if (g_crcPending)
+        if (AppUds_ConsumeResetPending() == TRUE)
         {
-            g_crcPending = FALSE;
             vTaskDelay(pdMS_TO_TICKS(APP_UDS_TASK_PERIOD_MS));
             IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
         }
@@ -198,6 +210,8 @@ static uint16 UDS_RequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
         return UDS_NegResponse(tx, UDS_SID_REQUEST_DOWNLOAD,
                                UDS_NRC_GENERAL_REJECT);
 
+    AppCore1Debug_Push("UDS_RequestDownload() called.");                               
+
     /* addrAndLengthFormatIdentifier 파싱
        하위 니블 = 주소 바이트 수
        상위 니블 = 크기 바이트 수  */
@@ -211,7 +225,7 @@ static uint16 UDS_RequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
     if (SOTA_IsGroupBActive())
         g_downloadAddr = 0x80020000UL;  /* inactive = Bank A */
     else
-        g_downloadAddr = 0x80320000UL;  /* inactive = Bank B */        
+        g_downloadAddr = 0x80320000UL;  /* inactive = Bank B */    
 
     /* 메모리 크기 파싱 */
     g_downloadSize = 0;
@@ -327,12 +341,15 @@ static uint16 UDS_TransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
  */
 static uint16 UDS_TransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
 {
-    LWIP_UNUSED_ARG(rx);
-    LWIP_UNUSED_ARG(rxLen);
-
     if (g_writtenBytes == 0)
         return UDS_NegResponse(tx, UDS_SID_TRANSFER_EXIT,
                                UDS_NRC_CONDITIONS_NOT_CORRECT);
+
+    if (rxLen < 5u)
+        return UDS_NegResponse(tx, UDS_SID_TRANSFER_EXIT,
+                               UDS_NRC_REQUEST_OUT_OF_RANGE);
+
+    AppCore1Debug_Push("UDS_TransferExit() called.");
 
     uint32 expectedCRC = ((uint32)rx[1] << 24) |
                          ((uint32)rx[2] << 16) |
