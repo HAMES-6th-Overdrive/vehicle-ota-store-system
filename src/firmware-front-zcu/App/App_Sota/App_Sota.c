@@ -285,6 +285,12 @@ static uint32 SOTA_GetSwapCfg(void)
     return (stmem1 & SCU_STMEM1_SWAP_CFG_MASK) >> SCU_STMEM1_SWAP_CFG_POS;
 }
 
+static uint32 SOTA_GetSwapen(void)
+{
+    uint32 procontp = *(volatile uint32 *)SOTA_PROCONTP_ADDR;
+    return (procontp & SOTA_PROCONTP_SWAPEN_MASK) >> SOTA_PROCONTP_SWAPEN_POS;
+}
+
 static void SOTA_EraseAndResetSwap(uint32 targetMarker)  /* SWAP_MARKER_A or SWAP_MARKER_B */
 {
     boolean irq;
@@ -350,29 +356,55 @@ static void SOTA_EraseAndResetSwap(uint32 targetMarker)  /* SWAP_MARKER_A or SWA
 
 boolean SOTA_IsInitialized(void)
 {
-    return (FindCurrentSwapEntry() >= 0) ? TRUE : FALSE;
+    return (SOTA_GetSwapen() == SOTA_PROCONTP_SWAPEN_ENABLED) ? TRUE : FALSE;
 }
 
 void SOTA_EnableSwapen(void)
 {
-    uint32 procontp = *(volatile uint32 *)0xAF4041E8UL;
+    uint32 procontp = *(volatile uint32 *)SOTA_PROCONTP_ADDR;
 
     /* SWAPEN = bits 17:16, Enabled = 0b11 */
-    if ((procontp & 0x00030000UL) != 0x00030000UL)
+    if ((procontp & SOTA_PROCONTP_SWAPEN_MASK) != SOTA_PROCONTP_SWAPEN_MASK)
     {
-        WriteDFlash8(0xAF4041E8UL,
-                     procontp | 0x00030000UL,
+        WriteDFlash8(SOTA_PROCONTP_ADDR,
+                     procontp | SOTA_PROCONTP_SWAPEN_MASK,
                      0x00000000UL);
     }
 }
 
 void SOTA_InitialSetup(void)
 {
-     WriteSwapEntry(0U, SWAP_MARKER_A);  /* Entry 0: Group A (초기 표준 맵) */
+    sint8  cur;
+    uint32 next;
 
-     SOTA_EnableSwapen();
+    /* 실제 SWAPEN 값 기준으로 disabled 상태일 때만 초기화한다.
+     * 기존 유효 entry가 있으면 덮어쓰지 않고 next entry에 Bank A marker를 append한다.
+     */
+    if (SOTA_IsInitialized())
+    {
+        return;
+    }
 
-     IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+    cur  = FindCurrentSwapEntry();
+    next = (cur < 0) ? 0U : (uint32)(cur + 1);
+
+    if (next >= 16U)
+    {
+        SOTA_EraseAndResetSwap(SWAP_MARKER_A);
+    }
+    else
+    {
+        WriteSwapEntry(next, SWAP_MARKER_A);  /* 초기 표준 맵: Bank A */
+
+        if (cur >= 0)
+        {
+            InvalidateSwapEntry((uint32)cur);
+        }
+    }
+
+    SOTA_EnableSwapen();
+
+    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
 }
 
 void SOTA_SwapToGroupB(void)

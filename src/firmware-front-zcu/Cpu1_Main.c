@@ -27,8 +27,20 @@
 #include "Ifx_Types.h"
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "App_DiagCore1/App_DiagCore1.h"
+#include "App_Debug/App_Core1Debug.h"
 
 extern IfxCpu_syncEvent g_cpuSyncEvent;
+
+static void Core1_DelayMs(uint32 loopCount)
+{
+    volatile uint32 i;
+
+    for (i = 0u; i < (loopCount * 30000u); i++)
+    {
+        __nop();
+    }
+}
 
 void core1_main(void)
 {
@@ -43,7 +55,13 @@ void core1_main(void)
     IfxCpu_emitEvent(&g_cpuSyncEvent);
     IfxCpu_waitEvent(&g_cpuSyncEvent, 1);
     
+    Core1_DelayMs(1000u);
+
+    AppDiagCore1_Init();
+    AppCore1Debug_Push("CPU Core1 Started!");
+
     while(1)
     {
+        AppDiagCore1_MainFunction();     
     }
 }

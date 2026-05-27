@@ -86,6 +86,7 @@ extern volatile uint32 g_TickCount_1ms;   /* Ifx_Lwip.c에 정의됨 */
 void AppUds_Task(void *arg);
 void UDS_HandleService(uint8  *rxData,   uint16  rxLen,
                        uint8  *txData,   uint16 *txLen);
+boolean AppUds_ConsumeResetPending(void);
 
 /*********************************************************************************************************************/
 

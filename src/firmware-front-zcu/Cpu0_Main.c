@@ -55,6 +55,7 @@
 #include "App_Sota/App_Sota.h"
 #include "App_Uds/App_Uds.h"
 #include "App_Debug/App_Debug.h"
+#include "App_Debug/App_Core1Debug.h"
 
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
@@ -81,6 +82,9 @@ void core0_main(void)
     IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
     IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
     
+    /* SOTA 초기화: SWAPEN disabled이면 next entry에 Bank A marker를 기록하고 SWAPEN enable 후 reset */
+    SOTA_InitialSetup();
+    
     /* Wait for CPU sync event */
     IfxCpu_emitEvent(&g_cpuSyncEvent);
     IfxCpu_waitEvent(&g_cpuSyncEvent, 1);
@@ -95,13 +99,10 @@ void core0_main(void)
     app_assert_pass(AppSomeip_Start());
     app_assert_pass(AppInfoService_Start());
     app_assert_pass(AppSensorService_Start());
-    app_assert_pass(xTaskCreate(AppUds_Task,
-                       "APP UDS",
-                       APP_UDS_TASK_STACK_SIZE,
-                       NULL,
-                       APP_UDS_TASK_PRIORITY,
-                       NULL));
+    
     AppDebug_Init();    
+    AppCore1Debug_Init();
+    AppCore1Debug_StartTask();
 
     /* Start the scheduler */
     vTaskStartScheduler();

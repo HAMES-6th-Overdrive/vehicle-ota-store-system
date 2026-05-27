@@ -31,6 +31,11 @@
 #define SOTA_SWAP_CFG_B               2U
 #define SOTA_SWAP_CFG_RESERVED        3U
 
+#define SOTA_PROCONTP_ADDR             0xAF4041E8UL
+#define SOTA_PROCONTP_SWAPEN_MASK      0x00030000UL
+#define SOTA_PROCONTP_SWAPEN_POS       16U
+#define SOTA_PROCONTP_SWAPEN_ENABLED   3U
+
 /* DFLASH 8바이트 쓰기 (공유) */
 void WriteDFlash8(uint32 addr, uint32 lo, uint32 hi);
 

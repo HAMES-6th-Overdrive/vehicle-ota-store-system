@@ -111,9 +111,6 @@ static void OTA_CopyFuncsToPSPR(void)
 
 boolean OTA_Flash_Erase(uint32 addr, uint32 size, IfxFlash_FlashType flashType)
 {
-    IfxCpu_setCoreMode(&MODULE_CPU1, IfxCpu_CoreMode_halt);
-    IfxCpu_setCoreMode(&MODULE_CPU2, IfxCpu_CoreMode_halt);
-
     OTA_CopyFuncsToPSPR();
 
     uint32 flashAddr   = TO_FLASH_ADDR(addr);
