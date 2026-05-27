@@ -13,7 +13,7 @@
 #include "FlashOta.h"
 #include "UART_VCOM.h"
 #include "IfxAsclin_Asc.h"
-//#define SLOW
+#define SLOW
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 /* Watch 확인용 */
