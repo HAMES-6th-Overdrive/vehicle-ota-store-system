@@ -13,7 +13,7 @@
 #include "FlashOta.h"
 #include "UART_VCOM.h"
 #include "IfxAsclin_Asc.h"
-#define SLOW
+//#define SLOW
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 
 /* Watch 확인용 */
@@ -86,7 +86,9 @@ void core0_main(void)
          * - 50ms task: 0x202
          * 를 실행한다.
          */
+
         Scheduler_run();
+        CanIf_ProcessPendingOtaRequest();
         FlashOta_Service();
         /*
          * 나중에 background task 추가 가능:

@@ -89,7 +89,7 @@ typedef struct
     uint32_t expectedCrc32;
     uint32_t calculatedCrc32;
 
-    uint16_t lastBlockIndex;
+    uint32_t lastBlockIndex;
     uint32_t lastWriteAddress;
     uint32_t verifyFailOffset;
 
@@ -103,7 +103,7 @@ void FlashOta_Reset(void);
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize);
 
-boolean FlashOta_WriteBlock(uint16_t blockIndex,
+boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
                             uint16_t length);
 

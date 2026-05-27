@@ -145,7 +145,7 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
     return TRUE;
 }
 
-boolean FlashOta_WriteBlock(uint16_t blockIndex,
+boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
                             uint16_t length)
 {

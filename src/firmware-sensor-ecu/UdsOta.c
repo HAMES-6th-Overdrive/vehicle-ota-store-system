@@ -60,11 +60,19 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length);
  * 나중에 팀원이 구현한 Flash/CRC/Jump 함수로 이 함수 내부만 교체하면 됨.
  */
 static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize);
-static boolean Target_WriteBlock(uint16_t blockIndex, const uint8_t *data, uint16_t length);
+static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint16_t length);
 static boolean Target_RequestTransferExit(void);
 static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32);
 static boolean Target_EcuReset(uint8_t resetType);
+static uint32_t selectInactiveSlotAddress(void)
+{
+    if (Sota_IsGroupBActive() == TRUE)
+    {
+        return FLASH_OTA_SLOT_A_START_ADDR_C;
+    }
 
+    return FLASH_OTA_SLOT_B_START_ADDR_C;
+}
 /* ============================================================
    Public API
    ============================================================ */
@@ -442,18 +450,18 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
     (void)requestedMemoryAddress;
 
     /*
-     * 현재 검증 단계에서는 A active로 가정하고 Slot B에 다운로드한다.
-     * 나중에 SOTA_IsGroupBActive() 연결 시 이 한 줄만 runtime 선택으로 교체하면 된다.
+        * targetMemoryAddress는 현재 active slot 기준으로 inactive slot 주소를 선택한다.
      */
-    if ((Sota_IsInitialized() == TRUE) && (Sota_IsGroupBActive() == TRUE))
-    {
-        targetMemoryAddress = FLASH_OTA_SLOT_A_START_ADDR_C;
-    }
-    else
-    {
-        targetMemoryAddress = FLASH_OTA_SLOT_B_START_ADDR_C;
-    }
+    targetMemoryAddress = selectInactiveSlotAddress();
 
+    g_udsOtaDebug.memoryAddress = targetMemoryAddress;
+
+    if (Target_BeginDownload(targetMemoryAddress, memorySize) == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                            UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
     if ((memorySize == 0U) ||
         (memorySize > UDS_OTA_MAX_IMAGE_SIZE))
     {
@@ -502,7 +510,7 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
 static void handleTransferData(const uint8_t *payload, uint8_t length)
 {
     uint8_t blockSequenceCounter;
-    uint16_t blockIndex;
+    uint32_t blockIndex;
     uint16_t dataLength;
     uint32_t remaining;
     const uint8_t *firmwareData;
@@ -762,7 +770,7 @@ static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize)
     return FlashOta_BeginDownload(memoryAddress, memorySize);
 }
 
-static boolean Target_WriteBlock(uint16_t blockIndex, const uint8_t *data, uint16_t length)
+static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint16_t length)
 {
     return FlashOta_WriteBlock(blockIndex, data, length);
 }
