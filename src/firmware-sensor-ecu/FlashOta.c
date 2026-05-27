@@ -33,13 +33,65 @@
 #include "SensorOtaFlash.h"
 
 #include <string.h>
+// debug
+typedef enum
+{
+    FLASH_OTA_FAIL_NONE = 0,
+    FLASH_OTA_FAIL_NOT_STARTED,
+    FLASH_OTA_FAIL_BAD_ARG,
+    FLASH_OTA_FAIL_NO_TARGET,
+    FLASH_OTA_FAIL_OFFSET_RANGE,
+    FLASH_OTA_FAIL_LENGTH_RANGE,
+    FLASH_OTA_FAIL_ERASE,
+    FLASH_OTA_FAIL_WRITE,
+    FLASH_OTA_FAIL_VERIFY
+} FlashOtaFailReason_t;
+
+typedef struct
+{
+    uint32_t failReason;
+
+    uint32_t blockIndex;
+    uint32_t offset;
+    uint32_t length;
+    uint32_t remaining;
+    uint32_t firmwareSize;
+
+    uint32_t targetBaseNc;
+    uint32_t writeAddressNc;
+    uint32_t writeEndAddressNc;
+
+    uint32_t eraseAddressNc;
+    uint32_t erasedUntilNc;
+
+    uint32_t flashType;
+    uint32_t dmuErr;
+
+    uint32_t verifyIndex;
+    uint32_t verifyOffset;
+    uint32_t verifyExpected;
+    uint32_t verifyActual;
+
+    uint32_t writeOkCount;
+    uint32_t writeFailCount;
+    uint32_t eraseCount;
+
+} FlashOta_WriteDebug_t;
+volatile FlashOta_WriteDebug_t g_flashOtaWriteDebug;
 
 /* ============================================================
    Internal state
    ============================================================ */
 
 static FlashOta_DebugInfo_t g_flashOtaDebug;
-
+/*
+ * 1: TransferData 중 32-byte page write 직후 byte-by-byte read-back verify 수행
+ * 0: 즉시 verify 생략. 최종 CRC 검증에서 판단.
+ *
+ * SOTA alternative mapping 상태에서는 A/B alias 때문에 즉시 read-back이
+ * 실제 write 결과와 다르게 보일 수 있으므로, 현재는 0 권장.
+ */
+#define FLASH_OTA_ENABLE_WRITE_VERIFY   0U
 /*
  * 현재 단계에서는 이름은 유지하지만,
  * 실제 App jump 또는 UCB_SWAP은 수행하지 않는다.
@@ -155,116 +207,184 @@ boolean FlashOta_WriteBlock(uint32_t blockIndex,
     uint32_t remaining;
     uint32_t writeEndAddrNc;
     IfxFlash_FlashType flashType;
+
+#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
     volatile const uint8 *readPtr;
+#endif
+
+    /*
+     * 공통 debug 초기 기록
+     */
+    g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
+    g_flashOtaWriteDebug.blockIndex = blockIndex;
+    g_flashOtaWriteDebug.length = length;
+    g_flashOtaWriteDebug.targetBaseNc = g_downloadTargetAddrNC;
+    g_flashOtaWriteDebug.firmwareSize = g_flashOtaDebug.firmwareSize;
+    g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+
+    /*
+     * verify 관련 debug는 이전 실패값이 남으면 헷갈리므로 매 block 초기화
+     */
+    g_flashOtaWriteDebug.verifyIndex = 0U;
+    g_flashOtaWriteDebug.verifyOffset = 0U;
+    g_flashOtaWriteDebug.verifyExpected = 0U;
+    g_flashOtaWriteDebug.verifyActual = 0U;
 
     if (g_flashOtaDebug.started == FALSE)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NOT_STARTED;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     if ((data == NULL_PTR) || (length == 0U) || (length > FLASH_OTA_PAGE_SIZE))
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_BAD_ARG;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     if (g_downloadTargetAddrNC == 0U)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NO_TARGET;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
-    /*
-     * blockIndex 기준 32-byte page offset 계산.
-     */
     offset = ((uint32_t)blockIndex * FLASH_OTA_PAGE_SIZE);
+    g_flashOtaWriteDebug.offset = offset;
 
     if (offset >= g_flashOtaDebug.firmwareSize)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_OFFSET_RANGE;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     remaining = g_flashOtaDebug.firmwareSize - offset;
+    g_flashOtaWriteDebug.remaining = remaining;
 
     if (length > remaining)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_LENGTH_RANGE;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     /*
      * 마지막 block이 32바이트보다 작을 수 있으므로 나머지는 0xFF padding.
-     *
-     * CRC는 나중에 firmwareSize만큼만 계산하므로,
-     * 이 padding은 CRC에 포함되지 않는다.
+     * CRC는 firmwareSize만큼만 계산하므로 padding은 CRC에 포함되지 않음.
      */
     memset(page, 0xFF, sizeof(page));
     memcpy(page, data, length);
 
-    /*
-     * target non-cached 주소에 write.
-     *
-     * 예:
-     *  - Slot A target:
-     *      blockIndex 0 -> 0xA0020000
-     *      blockIndex 1 -> 0xA0020020
-     *
-     *  - Slot B target:
-     *      blockIndex 0 -> 0xA0320000
-     *      blockIndex 1 -> 0xA0320020
-     */
     targetAddrNc = g_downloadTargetAddrNC + offset;
     writeEndAddrNc = targetAddrNc + FLASH_OTA_PAGE_SIZE;
 
+    g_flashOtaWriteDebug.writeAddressNc = targetAddrNc;
+    g_flashOtaWriteDebug.writeEndAddressNc = writeEndAddrNc;
+
+    /*
+     * 필요한 sector를 on-demand erase.
+     */
     while (writeEndAddrNc > g_erasedUntilAddrNC)
     {
         flashType = getPFlashTypeFromAddress(g_erasedUntilAddrNC);
+
+        g_flashOtaWriteDebug.eraseAddressNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
 
         if (SensorOtaFlash_Erase(g_erasedUntilAddrNC,
                                  FLASH_OTA_SECTOR_SIZE_BYTES,
                                  flashType) == FALSE)
         {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+            g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+            g_flashOtaWriteDebug.writeFailCount++;
+
             g_flashOtaDebug.writeFailCount++;
             return FALSE;
         }
 
         g_erasedUntilAddrNC += FLASH_OTA_SECTOR_SIZE_BYTES;
+
+        g_flashOtaWriteDebug.eraseCount++;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+
         g_flashOtaDebug.eraseCount++;
     }
 
     /*
-     * Trap 발생 전 주소 확인용.
+     * Write 직전 주소 기록.
      */
     g_flashOtaDebug.lastWriteAddress = targetAddrNc;
 
     flashType = getPFlashTypeFromAddress(targetAddrNc);
+    g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
 
     if (SensorOtaFlash_Write(targetAddrNc,
                              page,
                              FLASH_OTA_PAGE_SIZE,
                              flashType) == FALSE)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_WRITE;
+        g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+        g_flashOtaWriteDebug.writeFailCount++;
+
         g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     /*
-     * Read-back verify.
-     * non-cached 주소로 실제 Flash에 쓰인 값을 확인한다.
+     * SOTA alternative mapping 상태에서는 즉시 read-back alias가
+     * 실제 write 대상 physical bank와 다르게 보일 수 있으므로,
+     * byte-by-byte verify는 전처리기로 선택한다.
+     *
+     * 현재는 bootloader/CRC 단계에서 전체 firmware 검증 예정.
      */
+#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
     readPtr = (volatile const uint8 *)targetAddrNc;
 
-    for (uint32 i = 0U; i < FLASH_OTA_PAGE_SIZE; i++)
+    for (uint32_t i = 0U; i < FLASH_OTA_PAGE_SIZE; i++)
     {
         if (readPtr[i] != page[i])
         {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_VERIFY;
+            g_flashOtaWriteDebug.verifyIndex = i;
+            g_flashOtaWriteDebug.verifyOffset = offset + i;
+            g_flashOtaWriteDebug.verifyExpected = page[i];
+            g_flashOtaWriteDebug.verifyActual = readPtr[i];
+            g_flashOtaWriteDebug.writeFailCount++;
+
             g_flashOtaDebug.verifyFailOffset = offset + i;
             g_flashOtaDebug.writeFailCount++;
             return FALSE;
         }
     }
+#else
+    /*
+     * verify off 상태임을 Watch에서 구분하기 위한 표시.
+     * failReason은 NONE 유지.
+     */
+    g_flashOtaWriteDebug.verifyIndex = 0xFFFFFFFFU;
+    g_flashOtaWriteDebug.verifyOffset = 0xFFFFFFFFU;
+#endif
 
     g_flashOtaDebug.receivedBytes += length;
     g_flashOtaDebug.lastBlockIndex = blockIndex;
     g_flashOtaDebug.lastWriteAddress = targetAddrNc;
     g_flashOtaDebug.writeOkCount++;
+
+    g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
+    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+    g_flashOtaWriteDebug.writeOkCount++;
 
     return TRUE;
 }
