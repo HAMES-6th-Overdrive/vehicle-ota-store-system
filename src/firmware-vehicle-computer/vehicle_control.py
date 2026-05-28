@@ -16,10 +16,10 @@ from ethernet import build_someip_packet
 GEAR_P = "P"
 GEAR_D = "D"
 STEER_CENTER_BYTE = 127
-JOYSTICK_BUTTON_P = 0
-JOYSTICK_BUTTON_D = 1
-JOYSTICK_AXIS_SPEED = 1
-JOYSTICK_AXIS_STEER = 2
+JOYSTICK_BUTTON_P = int(os.getenv("VEHICLE_JOYSTICK_BUTTON_P", "0"))
+JOYSTICK_BUTTON_D = int(os.getenv("VEHICLE_JOYSTICK_BUTTON_D", "1"))
+JOYSTICK_AXIS_SPEED = int(os.getenv("VEHICLE_JOYSTICK_AXIS_SPEED", "1"))
+JOYSTICK_AXIS_STEER = int(os.getenv("VEHICLE_JOYSTICK_AXIS_STEER", "2"))
 SPEED_CENTER_BYTE = int(os.getenv("VEHICLE_SPEED_CENTER_BYTE", "127"))
 MANUAL_SPEED_DEADZONE = float(os.getenv("VEHICLE_MANUAL_SPEED_DEADZONE", "0.05"))
 MANUAL_STEER_DEADZONE = float(os.getenv("VEHICLE_MANUAL_STEER_DEADZONE", "0.02"))
@@ -57,6 +57,16 @@ class JoystickSignal:
     steer_byte: int
     source: str
     error: str | None = None
+    device_name: str | None = None
+    axes_count: int = 0
+    buttons_count: int = 0
+    hats_count: int = 0
+    button_p: bool = False
+    button_d: bool = False
+    raw_axis_speed: float = 0.0
+    raw_axis_steer: float = 0.0
+    drive_ready: bool = True
+    hold_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,8 +121,10 @@ class JoystickReader:
         self._last_mapping_warning: str | None = None
         self._settle_until = 0.0
         self._last_drive_block_reason: str | None = None
+        self._last_drive_block_logged_at = 0.0
         self._disconnect_started_at: float | None = None
         self._disconnect_reason: str | None = None
+        self._drive_ready = False
 
     def read(self) -> JoystickSignal:
         if self._joystick is None:
@@ -142,25 +154,44 @@ class JoystickReader:
             self._reset_disconnect_grace()
 
             if time.time() < self._settle_until:
-                self._capture_button_state()
-                return self._neutral("joystick reconnect settling")
+                return self._neutral("joystick reconnect settling", connected=True)
 
-            self._update_gear()
+            raw_axis_speed = self._read_axis_direct(self._axis_speed, "speed")
+            raw_axis_steer = self._read_axis_direct(self._axis_steer, "steer")
+            button_p = self._read_button_direct(self._button_p, "P")
+            button_d = self._read_button_direct(self._button_d, "D")
+            self._update_gear(
+                button_p=button_p,
+                button_d=button_d,
+                axis_speed=raw_axis_speed,
+                axis_steer=raw_axis_steer,
+            )
 
-            axis_speed = self._read_axis_direct(self._axis_speed, "speed")
-            axis_steer = self._read_axis_direct(self._axis_steer, "steer")
-            if abs(axis_speed) < MANUAL_SPEED_DEADZONE:
+            axis_speed = raw_axis_speed
+            axis_steer = raw_axis_steer
+            hold_reason = None
+            drive_ready = self._drive_ready
+
+            if abs(raw_axis_speed) < MANUAL_SPEED_DEADZONE:
                 axis_speed = 0.0
                 speed_byte = SPEED_CENTER_BYTE
             else:
-                speed_byte = axis_to_byte(axis_speed)
-            steer_byte = axis_to_byte(axis_steer)
+                speed_byte = axis_to_byte(raw_axis_speed)
+            steer_byte = axis_to_byte(raw_axis_steer)
 
             if self._gear == GEAR_P:
                 axis_speed = 0.0
                 axis_steer = 0.0
                 speed_byte = SPEED_CENTER_BYTE
                 steer_byte = STEER_CENTER_BYTE
+                drive_ready = False
+            elif not self._drive_ready:
+                axis_speed = 0.0
+                axis_steer = 0.0
+                speed_byte = SPEED_CENTER_BYTE
+                steer_byte = STEER_CENTER_BYTE
+                drive_ready = False
+                hold_reason = self._last_drive_block_reason or "drive output held until axes are neutral"
 
             return JoystickSignal(
                 connected=True,
@@ -170,6 +201,16 @@ class JoystickReader:
                 speed_byte=speed_byte,
                 steer_byte=steer_byte,
                 source="pygame",
+                device_name=self._name,
+                axes_count=self._axes,
+                buttons_count=self._buttons,
+                hats_count=self._hats,
+                button_p=button_p,
+                button_d=button_d,
+                raw_axis_speed=raw_axis_speed,
+                raw_axis_steer=raw_axis_steer,
+                drive_ready=drive_ready,
+                hold_reason=hold_reason,
             )
         except Exception as exc:
             self._mark_disconnected(str(exc))
@@ -243,6 +284,7 @@ class JoystickReader:
             self._gear = GEAR_P
             self._prev_button_p = self._read_button_direct(self._button_p, "P")
             self._prev_button_d = self._read_button_direct(self._button_d, "D")
+            self._drive_ready = False
             self._settle_until = time.time() + JOYSTICK_RECONNECT_SETTLE_SECONDS
             self._was_connected = True
             self._last_unavailable_reason = None
@@ -263,18 +305,24 @@ class JoystickReader:
             self._mark_unavailable(str(exc))
             self._joystick = None
 
-    def _update_gear(self) -> None:
-        button_p = self._read_button_direct(self._button_p, "P")
-        button_d = self._read_button_direct(self._button_d, "D")
-
-        if button_p and not self._prev_button_p:
+    def _update_gear(self, *, button_p: bool, button_d: bool, axis_speed: float, axis_steer: float) -> None:
+        if button_p and (not self._prev_button_p or self._gear != GEAR_P):
             self._gear = GEAR_P
-        if button_d and not self._prev_button_d:
-            if self._drive_axes_centered():
-                self._gear = GEAR_D
+            self._drive_ready = False
+            self._last_drive_block_reason = None
+        elif button_d and (not self._prev_button_d or self._gear != GEAR_D):
+            self._gear = GEAR_D
+            if self._drive_axes_centered(axis_speed=axis_speed, axis_steer=axis_steer):
+                self._drive_ready = True
                 self._last_drive_block_reason = None
             else:
-                self._gear = GEAR_P
+                self._drive_ready = False
+
+        if self._gear == GEAR_D and not self._drive_ready:
+            if self._drive_axes_centered(axis_speed=axis_speed, axis_steer=axis_steer):
+                logger.info("drive output armed after axes returned to neutral")
+                self._drive_ready = True
+                self._last_drive_block_reason = None
 
         self._prev_button_p = button_p
         self._prev_button_d = button_d
@@ -294,15 +342,15 @@ class JoystickReader:
             self._last_mapping_warning = warning
         return False
 
-    def _drive_axes_centered(self) -> bool:
-        axis_speed = self._read_axis_direct(self._axis_speed, "speed")
-        axis_steer = self._read_axis_direct(self._axis_steer, "steer")
+    def _drive_axes_centered(self, *, axis_speed: float, axis_steer: float) -> bool:
         centered = abs(axis_speed) < MANUAL_SPEED_DEADZONE and abs(axis_steer) < MANUAL_STEER_DEADZONE
         if not centered:
-            reason = f"drive ignored until axes are neutral: speed={axis_speed:.3f} steer={axis_steer:.3f}"
-            if reason != self._last_drive_block_reason:
+            reason = f"drive output held until axes are neutral: speed={axis_speed:.3f} steer={axis_steer:.3f}"
+            now = time.time()
+            if reason != self._last_drive_block_reason or now - self._last_drive_block_logged_at >= 2.0:
                 logger.warning(reason)
-                self._last_drive_block_reason = reason
+                self._last_drive_block_logged_at = now
+            self._last_drive_block_reason = reason
         return centered
 
     def _read_axis_direct(self, axis: int, label: str) -> float:
@@ -316,9 +364,9 @@ class JoystickReader:
             self._last_mapping_warning = warning
         return 0.0
 
-    def _neutral(self, reason: str) -> JoystickSignal:
+    def _neutral(self, reason: str, *, connected: bool = False) -> JoystickSignal:
         return JoystickSignal(
-            connected=False,
+            connected=connected,
             gear=GEAR_P,
             axis_speed=0.0,
             axis_steer=0.0,
@@ -326,6 +374,11 @@ class JoystickReader:
             steer_byte=STEER_CENTER_BYTE,
             source="neutral",
             error=reason,
+            device_name=self._name,
+            axes_count=self._axes,
+            buttons_count=self._buttons,
+            hats_count=self._hats,
+            drive_ready=False,
         )
 
     def _mark_disconnected(self, reason: str) -> None:
@@ -343,6 +396,7 @@ class JoystickReader:
         self._settle_until = 0.0
         self._disconnect_started_at = None
         self._disconnect_reason = None
+        self._drive_ready = False
 
     def _mark_unavailable(self, reason: str) -> None:
         if self._was_connected:
@@ -361,6 +415,7 @@ class JoystickReader:
         self._settle_until = 0.0
         self._disconnect_started_at = None
         self._disconnect_reason = None
+        self._drive_ready = False
 
 
 class DownloadedPythonFeature:
