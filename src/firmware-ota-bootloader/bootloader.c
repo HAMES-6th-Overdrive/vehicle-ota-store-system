@@ -28,6 +28,10 @@
 
 /*********************************************************************************************************************/
 /*-----------------------------------------------------Includes------------------------------------------------------*/
+/*********************************************************************************************************************/
+#include "Ifx_Types.h"
+#include "IfxCpu.h"
+#include "Ifx_Ssw.h"
 #include "bootloader.h"
 #include "ota_flash.h"
 #include "sota_ucb.h"
@@ -55,13 +59,13 @@ typedef void (*AppFunc)(void);
 
 static void Bootloader_JumpToApp(uint32 appAddr)
 {
-    __dsync();
-    __isync();    
+    AppFunc app = (AppFunc)TO_FLASH_ADDR(appAddr);
 
-    AppFunc app = (AppFunc)appAddr;
-    app();
+    IfxCpu_disableInterrupts();
+    Ifx_Ssw_DSYNC();
+    Ifx_Ssw_ISYNC();
 
-    while (1);
+    Ifx_Ssw_jumpToFunction(app);
 }
 
 void Bootloader_Main(void)
@@ -107,8 +111,9 @@ void Bootloader_Main(void)
                 SOTA_SwapToGroupA();
             else
                 SOTA_SwapToGroupB();
-
-            Bootloader_JumpToApp(APP_START_ADDR);
+            IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+            while (1) {}
+            //Bootloader_JumpToApp(APP_START_ADDR);
         }
         // 검증 실패 시 → 플래그 클리어 → Group A로 스왑 (복구 시나리오) → 새 FW 부팅
         else
