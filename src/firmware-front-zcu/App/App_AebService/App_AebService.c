@@ -31,10 +31,29 @@
 
 #define APP_AEB_TOF_DISTANCE_INVALID_MM      (0xFFFFu)
 
-#define APP_AEB_CALIB_SPEED_KMH_X100         (630u)
-#define APP_AEB_CALIB_BRAKE_DISTANCE_MM      (800u)
+/*
+ * AEB distance calculation parameters.
+ *
+ * Previous model:
+ *   brake_distance = 1000 * (speed / 6.3)^2
+ *
+ * New calibrated model:
+ *   d[mm] = 19v^2 + 40v
+ *   v = speed[km/h]
+ *
+ * Reason:
+ *   - 3.0 km/h  -> about 300 mm
+ *   - 4.0 km/h  -> about 450 mm
+ *   - 6.3 km/h  -> about 1000 mm
+ *
+ * This model keeps the high-speed distance close to the real AEB test result
+ * while preventing the low-speed brake distance from becoming too small.
+ */
+#define APP_AEB_BRAKE_QUAD_COEFF             (19u)
+#define APP_AEB_BRAKE_LINEAR_COEFF           (40u)
+
 #define APP_AEB_CONTROL_DELAY_MS             (100u)
-#define APP_AEB_SAFETY_MARGIN_MM             (150u)
+#define APP_AEB_SAFETY_MARGIN_MM             (200u)
 
 #define APP_AEB_MIN_STOP_DISTANCE_MM         (200u)
 #define APP_AEB_MAX_STOP_DISTANCE_MM         (2200u)
@@ -43,7 +62,11 @@
 #define APP_AEB_MIN_RELEASE_DISTANCE_MM      (200u)
 #define APP_AEB_RELEASE_CONFIRM_COUNT        (3u)
 
-#define APP_AEB_MAX_SPEED_KMH_X100           (700u)
+/*
+ * Current vehicle maximum speed is around 6.3 km/h.
+ * 650 means 6.50 km/h.
+ */
+#define APP_AEB_MAX_SPEED_KMH_X100           (650u)
 
 static uint16_t g_aeb_distance_mm = APP_AEB_TOF_DISTANCE_INVALID_MM;
 static uint16_t g_aeb_speed_kmh_x100 = 0u;
@@ -163,6 +186,7 @@ static void AppAebService_Task(void *arg)
         AppAebService_ProcessSomeip();
         AppAebService_Evaluate();
         AppAebService_SendPendingEvents();
+
         vTaskDelay(pdMS_TO_TICKS(APP_AEBSERVICE_TASK_PERIOD_MS));
     }
 }
@@ -194,6 +218,7 @@ static void AppAebService_UpdateFromFrame(const AppCanFrame *frame)
     value = AppAebService_ReadU16Le(frame->data);
 
     taskENTER_CRITICAL();
+
     if(frame->id == APP_AEBSERVICE_CAN_ID_TOF_DISTANCE)
     {
         g_aeb_distance_mm = value;
@@ -206,6 +231,7 @@ static void AppAebService_UpdateFromFrame(const AppCanFrame *frame)
     {
         /* No action required */
     }
+
     taskEXIT_CRITICAL();
 }
 
@@ -393,6 +419,10 @@ static void AppAebService_Evaluate(void)
 
     if(distance_mm == APP_AEB_TOF_DISTANCE_INVALID_MM)
     {
+        /*
+         * 0xFFFF is treated as no obstacle / out of range.
+         * If AEB is active, release only after consecutive confirmations.
+         */
         if(g_aeb_active == pdTRUE)
         {
             if(g_aeb_release_count < APP_AEB_RELEASE_CONFIRM_COUNT)
@@ -413,6 +443,10 @@ static void AppAebService_Evaluate(void)
     }
     else if(g_aeb_active == pdTRUE)
     {
+        /*
+         * AEB release condition uses hysteresis.
+         * Release distance is larger than stop distance.
+         */
         if(distance_mm >= release_distance_mm)
         {
             if(g_aeb_release_count < APP_AEB_RELEASE_CONFIRM_COUNT)
@@ -435,6 +469,9 @@ static void AppAebService_Evaluate(void)
     {
         g_aeb_release_count = 0u;
 
+        /*
+         * AEB trigger condition.
+         */
         if(distance_mm <= stop_distance_mm)
         {
             g_aeb_active = pdTRUE;
@@ -466,10 +503,12 @@ static void AppAebService_SendPendingEvents(void)
 
 static BaseType_t AppAebService_SendAebTriggeredEvent(void)
 {
-    static const LightSomeipEndpoint dst_endpoint = {
+    static const LightSomeipEndpoint dst_endpoint =
+    {
         .ip = APP_AEBSERVICE_VEHICLE_COMPUTER_IP,
         .port = APP_AEBSERVICE_VEHICLE_COMPUTER_PORT
     };
+
     LightSomeipPacket event_packet;
 
     if(light_someip_packet_init(&event_packet,
@@ -540,25 +579,40 @@ static uint16_t AppAebService_CalculateReleaseDistanceMm(uint16_t stop_distance_
 
 static uint16_t AppAebService_CalculateBrakeDistanceMm(uint16_t speed_kmh_x100)
 {
+    uint32_t speed;
     uint32_t brake_distance_mm;
-    uint32_t numerator;
-    uint32_t denominator;
 
-    numerator =
-        (uint32_t)APP_AEB_CALIB_BRAKE_DISTANCE_MM *
-        (uint32_t)speed_kmh_x100 *
-        (uint32_t)speed_kmh_x100;
-
-    denominator =
-        (uint32_t)APP_AEB_CALIB_SPEED_KMH_X100 *
-        (uint32_t)APP_AEB_CALIB_SPEED_KMH_X100;
-
-    if(denominator == 0u)
+    /*
+     * speed_kmh_x100:
+     *   300 = 3.00 km/h
+     *   400 = 4.00 km/h
+     *   630 = 6.30 km/h
+     *
+     * New model:
+     *   d[mm] = 19v^2 + 40v
+     *   v = speed[km/h]
+     *
+     * Integer conversion:
+     *   v = speed_kmh_x100 / 100
+     *
+     *   19v^2 = 19 * speed^2 / 10000
+     *   40v   = 40 * speed / 100
+     *
+     * Expected result:
+     *   3.00 km/h -> about 291 mm
+     *   4.00 km/h -> about 464 mm
+     *   6.30 km/h -> about 1006 mm
+     */
+    if(speed_kmh_x100 > APP_AEB_MAX_SPEED_KMH_X100)
     {
-        return 0u;
+        speed_kmh_x100 = APP_AEB_MAX_SPEED_KMH_X100;
     }
 
-    brake_distance_mm = numerator / denominator;
+    speed = (uint32_t)speed_kmh_x100;
+
+    brake_distance_mm =
+        ((APP_AEB_BRAKE_QUAD_COEFF * speed * speed) / 10000u) +
+        ((APP_AEB_BRAKE_LINEAR_COEFF * speed) / 100u);
 
     if(brake_distance_mm > 0xFFFFu)
     {
@@ -573,7 +627,22 @@ static uint16_t AppAebService_CalculateDelayDistanceMm(uint16_t speed_kmh_x100)
     uint32_t speed_mm_per_sec;
     uint32_t delay_distance_mm;
 
+    if(speed_kmh_x100 > APP_AEB_MAX_SPEED_KMH_X100)
+    {
+        speed_kmh_x100 = APP_AEB_MAX_SPEED_KMH_X100;
+    }
+
+    /*
+     * speed_kmh_x100 = km/h * 100
+     *
+     * 1 km/h = 1000 / 3.6 mm/s
+     *
+     * speed_mm_per_sec
+     *   = speed_kmh_x100 / 100 * 1000 / 3.6
+     *   = speed_kmh_x100 * 1000 / 360
+     */
     speed_mm_per_sec = ((uint32_t)speed_kmh_x100 * 1000u) / 360u;
+
     delay_distance_mm =
         (speed_mm_per_sec * (uint32_t)APP_AEB_CONTROL_DELAY_MS) / 1000u;
 

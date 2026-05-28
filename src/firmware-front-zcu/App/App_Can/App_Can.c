@@ -89,11 +89,11 @@ typedef struct AppCanTpChannelConfig {
 
 #define APP_CAN_RAW_RX_OBJECT_COUNT           (5u)
 static const AppCanRawRxObjectConfig g_appCanRawRxObjectConfigs[APP_CAN_MAX_RAW_RX_OBJECTS] = {
-    { 0x200u, 4u, 1u },
     { 0x201u, 4u, 1u },
     { 0x202u, 4u, 1u },
     { 0x702u, 2u, 1u },
-    { 0x703u, 2u, 1u }
+    { 0x703u, 2u, 1u },
+    { 0x601u, 8u, 0u }
 };
 static const uint8_t g_appCanRawRxObjectConfigCount = APP_CAN_RAW_RX_OBJECT_COUNT;
 
@@ -195,12 +195,28 @@ typedef struct AppCanTpChannel {
 
 static AppCanHwContext g_can_hw;
 static QueueHandle_t g_internal_rx_queue = NULL;
+#define APP_CAN_TX_STUCK_LIMIT_MS   20u
+
+static volatile uint32_t g_tx_in_progress_ticks = 0u;
+volatile uint32_t g_tx_stuck_recover_count = 0u;
 
 static AppCanTxQueueItem g_tx_queue[APP_CAN_TX_QUEUE_SIZE];
 static volatile uint8_t g_tx_queue_head = 0u;
 static volatile uint8_t g_tx_queue_tail = 0u;
 static volatile uint8_t g_tx_queue_count = 0u;
 static volatile boolean g_tx_in_progress = FALSE;
+volatile uint32_t g_tx_isr_count = 0u;
+volatile uint32_t g_tx_last_start_id = 0u;
+volatile uint8_t  g_tx_last_start_is_fd = 0u;
+volatile uint8_t  g_tx_last_start_len = 0u;
+volatile uint8_t  g_tx_last_start_data0 = 0u;
+volatile uint8_t  g_tx_last_start_data1 = 0u;
+
+volatile sint32   g_tx_last_status = 0;
+
+volatile uint32_t g_tx_send_ok_count = 0u;
+volatile uint32_t g_tx_send_busy_count = 0u;
+volatile uint32_t g_tx_send_error_count = 0u;
 
 static uint32_t g_rx_filter_ids[APP_CAN_MAX_STD_RX_FILTERS];
 static uint8_t g_rx_filter_count = 0u;
@@ -293,6 +309,7 @@ IFX_INTERRUPT(AppCan_RxIsr, 0, APP_CAN_ISR_PRIORITY_RX);
 
 void AppCan_TxIsr(void)
 {
+    g_tx_isr_count++;
     IfxCan_Node_clearInterruptFlag(g_can_hw.can_node.node,
                                    IfxCan_Interrupt_transmissionCompleted);
 
@@ -599,7 +616,29 @@ static void AppCan_Task(void *arg)
     {
         AppCan_ProcessRx();
         AppCan_TpMainFunction();
+
+        taskENTER_CRITICAL();
+
+        if(g_tx_in_progress == TRUE)
+        {
+            g_tx_in_progress_ticks++;
+
+            if(g_tx_in_progress_ticks >= APP_CAN_TX_STUCK_LIMIT_MS)
+            {
+                g_tx_in_progress = FALSE;
+                g_tx_in_progress_ticks = 0u;
+                g_tx_stuck_recover_count++;
+            }
+        }
+        else
+        {
+            g_tx_in_progress_ticks = 0u;
+        }
+
         AppCan_TryStartNextTx();
+
+        taskEXIT_CRITICAL();
+
         vTaskDelay(pdMS_TO_TICKS(APP_CAN_TASK_PERIOD_MS));
     }
 }
@@ -1055,6 +1094,12 @@ static void AppCan_TryStartNextTx(void)
 {
     AppCanTxQueueItem *item;
     IfxCan_Status status;
+    //debug
+    volatile uint32_t g_tx_ota600_start_count = 0u;
+    volatile uint8_t  g_tx_ota600_data0 = 0u;
+    volatile uint8_t  g_tx_ota600_data1 = 0u;
+    volatile uint8_t  g_tx_ota600_len = 0u;
+    volatile uint8_t  g_tx_ota600_is_fd = 0u;
 
     if((g_tx_in_progress == TRUE) || (g_tx_queue_count == 0u))
     {
@@ -1062,17 +1107,69 @@ static void AppCan_TryStartNextTx(void)
     }
 
     item = &g_tx_queue[g_tx_queue_head];
+
+    /*
+     * Debug: 실제 HW TX buffer에 넣으려는 frame 정보
+     */
+    g_tx_last_start_id = item->id;
+    g_tx_last_start_is_fd = item->is_fd;
+    g_tx_last_start_len = item->length;
+
+    if(item->length > 0u)
+    {
+        g_tx_last_start_data0 = item->data[0];
+    }
+    else
+    {
+        g_tx_last_start_data0 = 0u;
+    }
+
+    if(item->length > 1u)
+    {
+        g_tx_last_start_data1 = item->data[1];
+    }
+    else
+    {
+        g_tx_last_start_data1 = 0u;
+    }
+    if(item->id == 0x600u)
+{
+    g_tx_ota600_start_count++;
+    g_tx_ota600_len = item->length;
+    g_tx_ota600_is_fd = item->is_fd;
+    g_tx_ota600_data0 = (item->length > 0u) ? item->data[0] : 0u;
+    g_tx_ota600_data1 = (item->length > 1u) ? item->data[1] : 0u;
+}
     AppCan_PrepareTxMessage(item);
 
     status = IfxCan_Can_sendMessage(&g_can_hw.can_node,
                                     &g_can_hw.tx_msg,
                                     g_can_hw.tx_data);
 
+    /*
+     * Debug: sendMessage return status 기록
+     */
+    g_tx_last_status = (sint32)status;
+
     if(status == IfxCan_Status_notSentBusy)
     {
         g_tx_busy_count++;
+        g_tx_send_busy_count++;
         return;
     }
+
+    /*
+     * 중요:
+     * notSentBusy가 아니라고 무조건 성공 처리하면 안 됨.
+     * 반드시 OK일 때만 queue에서 제거해야 함.
+     */
+    if(status != IfxCan_Status_ok)
+    {
+        g_tx_send_error_count++;
+        return;
+    }
+
+    g_tx_send_ok_count++;
 
     g_tx_queue_head++;
     if(g_tx_queue_head >= APP_CAN_TX_QUEUE_SIZE)
@@ -1084,7 +1181,6 @@ static void AppCan_TryStartNextTx(void)
     g_tx_in_progress = TRUE;
     g_tx_sent_count++;
 }
-
 static void AppCan_PrepareTxMessage(const AppCanTxQueueItem *item)
 {
     IfxCan_Can_initMessage(&g_can_hw.tx_msg);
