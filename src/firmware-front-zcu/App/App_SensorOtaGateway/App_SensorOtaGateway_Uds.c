@@ -379,7 +379,12 @@ static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx)
     if(waitUntilWaitingBlock(APP_SENSOR_OTA_GATEWAY_WAIT_BLOCK_TIMEOUT_MS) == FALSE)
     {
         g_sensorOtaUdsWaitBlockTimeoutCount++;
-
+        if(AppOtaReceiver_IsError() == TRUE)
+        {
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE);
+        }
         return makeNegativeResponse(tx,
                                     APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD,
                                     APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE);
