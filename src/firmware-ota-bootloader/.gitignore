@@ -13,3 +13,11 @@ TriCore Debug (TASKING)/
 
 # 이미지 (용량 큰 경우)
 Images/
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.h
+Libraries/Ethernet/lwip/port/src/Ifx_Lwip.c
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.c
+Libraries/Infra/Ssw/TC37A/Tricore/Ifx_Ssw_Infra.h
+Configurations/lwipopts.h
+.vscode/settings.json
+Libraries/Ethernet/lwip/port/src/Ifx_Lwip.c
+Configurations/lwipopts.h

@@ -1,5 +1,5 @@
 /**********************************************************************************************************************
- * \file Cpu0_Main.c
+ * \file UART_VCOM.h
  * \copyright Copyright (C) Infineon Technologies AG 2019
  *
  * Use of this file is subject to the terms of use agreed between (i) you or the company in which ordinary course of
@@ -24,74 +24,14 @@
  * CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  *********************************************************************************************************************/
-#include "Ifx_Types.h"
-#include "IfxCpu.h"
-#include "IfxScuWdt.h"
-#include "Ifx_Cfg_Ssw.h"
-#include "sota_ucb.h"
-#include "ota_flash.h"
-#include <stdio.h>
-#include "IfxAsclin_Asc.h"
-#include "IfxAsclin_reg.h"
-#include "UART_VCOM.h"
 
-boolean g_isGroupBActive = FALSE;
-extern IfxAsclin_Asc g_ascPrint;
+#ifndef UART_VCOM_H_
+#define UART_VCOM_H_
 
-int _write(int fd, char *buf, int len)
-{
-    (void)fd;
+/*********************************************************************************************************************/
+/*------------------------------------------------Function Prototypes------------------------------------------------*/
+/*********************************************************************************************************************/
 
-    if ((buf == NULL_PTR) || (len <= 0))
-        return 0;
+void init_UART(void);           /* Initialization function  */
 
-    for (int i = 0; i < len; i++)
-    {
-        uint32 timeout = 1000000u;
-
-        while ((IfxAsclin_getTxFifoFillLevel(&MODULE_ASCLIN0) >= 16u) && (timeout-- > 0u))
-            __nop();
-
-        if (timeout == 0u)
-            break;
-
-        IfxAsclin_writeTxData(&MODULE_ASCLIN0, (uint16)(uint8)buf[i]);
-    }
-
-    return len;
-}
-
-IFX_ALIGN(4) IfxCpu_syncEvent cpuSyncEvent = 0;
-extern void Bootloader_Main(void);
-
-void core1_main(void) { while(1) {} }
-void core2_main(void) { while(1) {} }
-
-void core0_main(void)
-{
-    // IfxCpu_enableInterrupts();
-
-    /* !!WATCHDOG0 AND SAFETY WATCHDOG ARE DISABLED HERE!!
-     * Enable the watchdogs and service them periodically if it is required
-     */
-    IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
-    IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
-
-    /* Wait for CPU sync event */
-    IfxCpu_emitEvent(&cpuSyncEvent);
-    IfxCpu_waitEvent(&cpuSyncEvent, 1);
-
-    init_UART();
-    if (!SOTA_IsInitialized()) {
-           SOTA_InitialSetup();
-    }
-    g_isGroupBActive = SOTA_IsGroupBActive();
-    g_isGroupBActive ? printf("Bootloader Bank B!\r\n") : printf("Bootloader Bank A!\r\n");    
-
-    for (int i = 0; i < 10000000; ++i);
-    Bootloader_Main();
-
-    while(1)
-    {
-    }
-}
+#endif /* UART_VCOM_H_ */

@@ -88,17 +88,24 @@ void Bootloader_Main(void)
         
         boolean isGroupBActive = SOTA_IsGroupBActive();
 
-        /* With SOTA swap enabled, the active application is always visible at
-         * BANK_A_START. Verify the inactive logical update slot.
-         */
-        uint32 targetStart = BANK_B_START;
+        //uint32 targetStart = isGroupBActive ? BANK_A_START : BANK_B_START;
+        //uint32 targetSize  = isGroupBActive ? BANK_A_SIZE  : BANK_B_SIZE;
+        uint32 targetStart = BANK_B_START;   /* SOTA swap 전 inactive logical slot */
         uint32 targetSize  = BANK_B_SIZE;
+        //fwSize = targetSize;
+
         // 검증 성공 시 Group B로 스왑, 실패 시 Group A로 스왑 
+#if 1        
         if ((fwSize > 0) &&
             (fwSize <= targetSize) &&
             OTA_Flash_VerifyCRC(targetStart, fwSize, expectedCRC))
+#else
+        if (1)
+#endif
         {
+            printf("swap\n");
             OTA_Flash_ClearFlag();
+            for (int i = 0; i < 10000000; ++i);            
 
             if (isGroupBActive)
                 SOTA_SwapToGroupA();
@@ -111,6 +118,7 @@ void Bootloader_Main(void)
         // 검증 실패 시 → 플래그 클리어 → Group A로 스왑 (복구 시나리오) → 새 FW 부팅
         else
         {
+            printf("crc failed\n");
             OTA_Flash_ClearFlag();
 
             // if (SOTA_IsGroupBActive())
