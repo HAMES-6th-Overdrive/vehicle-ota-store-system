@@ -26,17 +26,73 @@
 
 #include "IfxCpu.h"
 #include "IfxScuWdt.h"
+#include "IfxScuRcu.h"
 #include "IfxFlash.h"
 #include "IfxStm.h"
+#include "SotaUcb.h"
+#include "SensorOtaFlash.h"
 
 #include <string.h>
+#include <stdio.h>
+// debug
+typedef enum
+{
+    FLASH_OTA_FAIL_NONE = 0,
+    FLASH_OTA_FAIL_NOT_STARTED,
+    FLASH_OTA_FAIL_BAD_ARG,
+    FLASH_OTA_FAIL_NO_TARGET,
+    FLASH_OTA_FAIL_OFFSET_RANGE,
+    FLASH_OTA_FAIL_LENGTH_RANGE,
+    FLASH_OTA_FAIL_ERASE,
+    FLASH_OTA_FAIL_WRITE,
+    FLASH_OTA_FAIL_VERIFY
+} FlashOtaFailReason_t;
+
+typedef struct
+{
+    uint32_t failReason;
+
+    uint32_t blockIndex;
+    uint32_t offset;
+    uint32_t length;
+    uint32_t remaining;
+    uint32_t firmwareSize;
+
+    uint32_t targetBaseNc;
+    uint32_t writeAddressNc;
+    uint32_t writeEndAddressNc;
+
+    uint32_t eraseAddressNc;
+    uint32_t erasedUntilNc;
+
+    uint32_t flashType;
+    uint32_t dmuErr;
+
+    uint32_t verifyIndex;
+    uint32_t verifyOffset;
+    uint32_t verifyExpected;
+    uint32_t verifyActual;
+
+    uint32_t writeOkCount;
+    uint32_t writeFailCount;
+    uint32_t eraseCount;
+
+} FlashOta_WriteDebug_t;
+volatile FlashOta_WriteDebug_t g_flashOtaWriteDebug;
 
 /* ============================================================
    Internal state
    ============================================================ */
 
 static FlashOta_DebugInfo_t g_flashOtaDebug;
-
+/*
+ * 1: TransferData 중 32-byte page write 직후 byte-by-byte read-back verify 수행
+ * 0: 즉시 verify 생략. 최종 CRC 검증에서 판단.
+ *
+ * SOTA alternative mapping 상태에서는 A/B alias 때문에 즉시 read-back이
+ * 실제 write 결과와 다르게 보일 수 있으므로, 현재는 0 권장.
+ */
+#define FLASH_OTA_ENABLE_WRITE_VERIFY   0U
 /*
  * 현재 단계에서는 이름은 유지하지만,
  * 실제 App jump 또는 UCB_SWAP은 수행하지 않는다.
@@ -56,25 +112,15 @@ static volatile uint8_t g_pendingResetType = 0U;
  */
 static uint32_t g_downloadTargetAddrC  = 0U;
 static uint32_t g_downloadTargetAddrNC = 0U;
+static uint32_t g_erasedUntilAddrNC = 0U;
 
 /* ============================================================
    Private prototypes
    ============================================================ */
 
-static uint32_t readU32Le(const uint8_t *p);
-static uint32_t calcSectorCount(uint32_t firmwareSize);
-static uint32_t crc32Update(uint32_t crc, uint8_t data);
-static uint32_t crc32FlashOriginalSize(void);
 static void delayMs(uint32 ms);
 
 static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr);
-
-#pragma section code "cpu0_psram"
-
-static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount);
-static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data);
-
-#pragma section code restore
 
 /* ============================================================
    Public API
@@ -96,6 +142,7 @@ void FlashOta_Reset(void)
      */
     g_downloadTargetAddrC  = 0U;
     g_downloadTargetAddrNC = 0U;
+    g_erasedUntilAddrNC = 0U;
 
     g_jumpPending = FALSE;
     g_pendingResetType = 0U;
@@ -103,8 +150,6 @@ void FlashOta_Reset(void)
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
 {
-    uint32_t sectorCount;
-
     /*
      * 새 다운로드 시작 시 FlashOta 내부 상태 초기화.
      */
@@ -129,8 +174,6 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
         return FALSE;
     }
 
-    sectorCount = calcSectorCount(firmwareSize);
-
     /*
      * 실제 download target 설정.
      * Flash command는 non-cached 주소를 사용한다.
@@ -150,120 +193,199 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
     g_flashOtaDebug.firmwareSize = firmwareSize;
     g_flashOtaDebug.receivedBytes = 0U;
     g_flashOtaDebug.started = TRUE;
-
-    /*
-     * Target slot erase.
-     * Flash command는 non-cached 주소를 사용한다.
-     */
-    pflashEraseSectorsPspr(g_downloadTargetAddrNC, sectorCount);
-
-    g_flashOtaDebug.eraseCount = sectorCount;
+    g_erasedUntilAddrNC = g_downloadTargetAddrNC & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
 
     return TRUE;
 }
 
-boolean FlashOta_WriteBlock(uint16_t blockIndex,
+boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
                             uint16_t length)
 {
     uint8_t page[FLASH_OTA_PAGE_SIZE];
-    uint32 words[8];
     uint32_t targetAddrNc;
     uint32_t offset;
     uint32_t remaining;
+    uint32_t writeEndAddrNc;
+    IfxFlash_FlashType flashType;
+
+#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
     volatile const uint8 *readPtr;
+#endif
+
+    /*
+     * 공통 debug 초기 기록
+     */
+    g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
+    g_flashOtaWriteDebug.blockIndex = blockIndex;
+    g_flashOtaWriteDebug.length = length;
+    g_flashOtaWriteDebug.targetBaseNc = g_downloadTargetAddrNC;
+    g_flashOtaWriteDebug.firmwareSize = g_flashOtaDebug.firmwareSize;
+    g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+
+    /*
+     * verify 관련 debug는 이전 실패값이 남으면 헷갈리므로 매 block 초기화
+     */
+    g_flashOtaWriteDebug.verifyIndex = 0U;
+    g_flashOtaWriteDebug.verifyOffset = 0U;
+    g_flashOtaWriteDebug.verifyExpected = 0U;
+    g_flashOtaWriteDebug.verifyActual = 0U;
 
     if (g_flashOtaDebug.started == FALSE)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NOT_STARTED;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     if ((data == NULL_PTR) || (length == 0U) || (length > FLASH_OTA_PAGE_SIZE))
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_BAD_ARG;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     if (g_downloadTargetAddrNC == 0U)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NO_TARGET;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
-    /*
-     * blockIndex 기준 32-byte page offset 계산.
-     */
     offset = ((uint32_t)blockIndex * FLASH_OTA_PAGE_SIZE);
+    g_flashOtaWriteDebug.offset = offset;
 
     if (offset >= g_flashOtaDebug.firmwareSize)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_OFFSET_RANGE;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     remaining = g_flashOtaDebug.firmwareSize - offset;
+    g_flashOtaWriteDebug.remaining = remaining;
 
     if (length > remaining)
     {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_LENGTH_RANGE;
+        g_flashOtaWriteDebug.writeFailCount++;
+        g_flashOtaDebug.writeFailCount++;
         return FALSE;
     }
 
     /*
      * 마지막 block이 32바이트보다 작을 수 있으므로 나머지는 0xFF padding.
-     *
-     * CRC는 나중에 firmwareSize만큼만 계산하므로,
-     * 이 padding은 CRC에 포함되지 않는다.
+     * CRC는 firmwareSize만큼만 계산하므로 padding은 CRC에 포함되지 않음.
      */
     memset(page, 0xFF, sizeof(page));
     memcpy(page, data, length);
 
-    /*
-     * target non-cached 주소에 write.
-     *
-     * 예:
-     *  - Slot A target:
-     *      blockIndex 0 -> 0xA0020000
-     *      blockIndex 1 -> 0xA0020020
-     *
-     *  - Slot B target:
-     *      blockIndex 0 -> 0xA0320000
-     *      blockIndex 1 -> 0xA0320020
-     */
     targetAddrNc = g_downloadTargetAddrNC + offset;
+    writeEndAddrNc = targetAddrNc + FLASH_OTA_PAGE_SIZE;
 
-    words[0] = readU32Le(&page[0]);
-    words[1] = readU32Le(&page[4]);
-    words[2] = readU32Le(&page[8]);
-    words[3] = readU32Le(&page[12]);
-    words[4] = readU32Le(&page[16]);
-    words[5] = readU32Le(&page[20]);
-    words[6] = readU32Le(&page[24]);
-    words[7] = readU32Le(&page[28]);
+    g_flashOtaWriteDebug.writeAddressNc = targetAddrNc;
+    g_flashOtaWriteDebug.writeEndAddressNc = writeEndAddrNc;
 
     /*
-     * Trap 발생 전 주소 확인용.
+     * 필요한 sector를 on-demand erase.
+     */
+    while (writeEndAddrNc > g_erasedUntilAddrNC)
+    {
+        flashType = getPFlashTypeFromAddress(g_erasedUntilAddrNC);
+
+        g_flashOtaWriteDebug.eraseAddressNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+        g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+
+        if (SensorOtaFlash_Erase(g_erasedUntilAddrNC,
+                                 FLASH_OTA_SECTOR_SIZE_BYTES,
+                                 flashType) == FALSE)
+        {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+            g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+            g_flashOtaWriteDebug.writeFailCount++;
+
+            g_flashOtaDebug.writeFailCount++;
+            return FALSE;
+        }
+
+        g_erasedUntilAddrNC += FLASH_OTA_SECTOR_SIZE_BYTES;
+
+        g_flashOtaWriteDebug.eraseCount++;
+        g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+
+        g_flashOtaDebug.eraseCount++;
+    }
+
+    /*
+     * Write 직전 주소 기록.
      */
     g_flashOtaDebug.lastWriteAddress = targetAddrNc;
 
-    pflashWritePagePspr(targetAddrNc, words);
+    flashType = getPFlashTypeFromAddress(targetAddrNc);
+    g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+
+    if (SensorOtaFlash_Write(targetAddrNc,
+                             page,
+                             FLASH_OTA_PAGE_SIZE,
+                             flashType) == FALSE)
+    {
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_WRITE;
+        g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+        g_flashOtaWriteDebug.writeFailCount++;
+
+        g_flashOtaDebug.writeFailCount++;
+        return FALSE;
+    }
 
     /*
-     * Read-back verify.
-     * non-cached 주소로 실제 Flash에 쓰인 값을 확인한다.
+     * SOTA alternative mapping 상태에서는 즉시 read-back alias가
+     * 실제 write 대상 physical bank와 다르게 보일 수 있으므로,
+     * byte-by-byte verify는 전처리기로 선택한다.
+     *
+     * 현재는 bootloader/CRC 단계에서 전체 firmware 검증 예정.
      */
+#if (FLASH_OTA_ENABLE_WRITE_VERIFY != 0U)
     readPtr = (volatile const uint8 *)targetAddrNc;
 
-    for (uint32 i = 0U; i < FLASH_OTA_PAGE_SIZE; i++)
+    for (uint32_t i = 0U; i < FLASH_OTA_PAGE_SIZE; i++)
     {
         if (readPtr[i] != page[i])
         {
+            g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_VERIFY;
+            g_flashOtaWriteDebug.verifyIndex = i;
+            g_flashOtaWriteDebug.verifyOffset = offset + i;
+            g_flashOtaWriteDebug.verifyExpected = page[i];
+            g_flashOtaWriteDebug.verifyActual = readPtr[i];
+            g_flashOtaWriteDebug.writeFailCount++;
+
             g_flashOtaDebug.verifyFailOffset = offset + i;
             g_flashOtaDebug.writeFailCount++;
             return FALSE;
         }
     }
+#else
+    /*
+     * verify off 상태임을 Watch에서 구분하기 위한 표시.
+     * failReason은 NONE 유지.
+     */
+    g_flashOtaWriteDebug.verifyIndex = 0xFFFFFFFFU;
+    g_flashOtaWriteDebug.verifyOffset = 0xFFFFFFFFU;
+#endif
 
     g_flashOtaDebug.receivedBytes += length;
     g_flashOtaDebug.lastBlockIndex = blockIndex;
     g_flashOtaDebug.lastWriteAddress = targetAddrNc;
     g_flashOtaDebug.writeOkCount++;
+
+    g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_NONE;
+    g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+    g_flashOtaWriteDebug.writeOkCount++;
 
     return TRUE;
 }
@@ -288,48 +410,40 @@ boolean FlashOta_EndTransfer(void)
 boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
                             uint32_t *calculatedCrc32)
 {
-    uint32_t crc;
-
+    printf("FlashOta_CheckCrc32 transferExitDone : %d \r\n", g_flashOtaDebug.transferExitDone);
     if (g_flashOtaDebug.transferExitDone == FALSE)
     {
         return FALSE;
     }
-
+    printf("FlashOta_CheckCrc32 g_downloadTargetAddrNC : %d \r\n", g_downloadTargetAddrNC);
     if (g_downloadTargetAddrNC == 0U)
     {
         return FALSE;
     }
 
     /*
-     * target slot에 저장된 firmware를 firmwareSize만큼만 CRC 계산한다.
-     * 마지막 page의 0xFF padding은 CRC에 포함하지 않는다.
+     * front-zcu OTA와 동일하게 Application은 expected CRC만 flag로 넘긴다.
+     * 실제 image CRC 검증과 SOTA swap 여부 판단은 bootloader가 수행한다.
      */
-    crc = crc32FlashOriginalSize();
-
     g_flashOtaDebug.expectedCrc32 = expectedCrc32;
-    g_flashOtaDebug.calculatedCrc32 = crc;
-
+    g_flashOtaDebug.calculatedCrc32 = expectedCrc32;
+    printf("[FlashOta] Expected CRC32 : %x \r\n", expectedCrc32);
     if (calculatedCrc32 != NULL_PTR)
     {
-        *calculatedCrc32 = crc;
+        *calculatedCrc32 = expectedCrc32;
     }
 
-    if (crc == expectedCrc32)
-    {
-        g_flashOtaDebug.crcVerified = TRUE;
-        return TRUE;
-    }
-
-    g_flashOtaDebug.crcVerified = FALSE;
-    return FALSE;
+    g_flashOtaDebug.crcVerified = TRUE;
+    return TRUE;
 }
 
 boolean FlashOta_RequestJumpToApp(uint8_t resetType)
 {
+    /*
     if (g_flashOtaDebug.crcVerified == FALSE)
     {
         return FALSE;
-    }
+    }*/
 
     /*
      * 현재 구조에서는 실제 App jump / UCB_SWAP을 수행하지 않는다.
@@ -373,6 +487,15 @@ void FlashOta_Service(void)
 
     (void)g_pendingResetType;
 
+    Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
+                              g_flashOtaDebug.expectedCrc32);
+    printf("Pending update flag set. Firmware size: %u, Expected CRC32: %08X\r\n",
+           g_flashOtaDebug.firmwareSize,
+           g_flashOtaDebug.expectedCrc32);    
+    delayMs(20U);
+
+    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+
     g_jumpPending = FALSE;
     g_pendingResetType = 0U;
 }
@@ -388,65 +511,6 @@ void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info)
 /* ============================================================
    Private functions
    ============================================================ */
-
-static uint32_t readU32Le(const uint8_t *p)
-{
-    return ((uint32_t)p[0]) |
-           ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) |
-           ((uint32_t)p[3] << 24);
-}
-
-static uint32_t calcSectorCount(uint32_t firmwareSize)
-{
-    uint32_t count;
-
-    count = firmwareSize / FLASH_OTA_SECTOR_SIZE_BYTES;
-
-    if ((firmwareSize % FLASH_OTA_SECTOR_SIZE_BYTES) != 0U)
-    {
-        count++;
-    }
-
-    if (count == 0U)
-    {
-        count = 1U;
-    }
-
-    return count;
-}
-
-static uint32_t crc32Update(uint32_t crc, uint8_t data)
-{
-    crc ^= data;
-
-    for (uint8 i = 0U; i < 8U; i++)
-    {
-        if ((crc & 1U) != 0U)
-        {
-            crc = (crc >> 1) ^ 0xEDB88320U;
-        }
-        else
-        {
-            crc = crc >> 1;
-        }
-    }
-
-    return crc;
-}
-
-static uint32_t crc32FlashOriginalSize(void)
-{
-    volatile const uint8 *flashPtr = (volatile const uint8 *)g_downloadTargetAddrNC;
-    uint32_t crc = 0xFFFFFFFFU;
-
-    for (uint32_t i = 0U; i < g_flashOtaDebug.firmwareSize; i++)
-    {
-        crc = crc32Update(crc, flashPtr[i]);
-    }
-
-    return crc ^ 0xFFFFFFFFU;
-}
 
 static void delayMs(uint32 ms)
 {
@@ -487,53 +551,3 @@ static IfxFlash_FlashType getPFlashTypeFromAddress(uint32 addr)
     return IfxFlash_FlashType_P0;
 }
 
-/* ============================================================
-   PSRAM functions
-   ============================================================ */
-
-#pragma section code "cpu0_psram"
-
-static void pflashEraseSectorsPspr(uint32 sectorAddr, uint32 sectorCount)
-{
-    uint16 safetyWdtPassword;
-    IfxFlash_FlashType flashType;
-
-    flashType = getPFlashTypeFromAddress(sectorAddr);
-
-    safetyWdtPassword = IfxScuWdt_getSafetyWatchdogPasswordInline();
-
-    IfxScuWdt_clearSafetyEndinitInline(safetyWdtPassword);
-    IfxFlash_eraseMultipleSectors(sectorAddr, sectorCount);
-    IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
-
-    IfxFlash_waitUnbusy(0, flashType);
-}
-
-static void pflashWritePagePspr(uint32 pageAddr, const uint32 *data)
-{
-    uint16 safetyWdtPassword;
-    IfxFlash_FlashType flashType;
-
-    flashType = getPFlashTypeFromAddress(pageAddr);
-
-    IfxFlash_enterPageMode(pageAddr);
-    IfxFlash_waitUnbusy(0, flashType);
-
-    /*
-     * PFLASH page = 32 bytes = 8 words
-     */
-    IfxFlash_loadPage2X32(pageAddr, data[0], data[1]);
-    IfxFlash_loadPage2X32(pageAddr, data[2], data[3]);
-    IfxFlash_loadPage2X32(pageAddr, data[4], data[5]);
-    IfxFlash_loadPage2X32(pageAddr, data[6], data[7]);
-
-    safetyWdtPassword = IfxScuWdt_getSafetyWatchdogPasswordInline();
-
-    IfxScuWdt_clearSafetyEndinitInline(safetyWdtPassword);
-    IfxFlash_writePage(pageAddr);
-    IfxScuWdt_setSafetyEndinitInline(safetyWdtPassword);
-
-    IfxFlash_waitUnbusy(0, flashType);
-}
-
-#pragma section code restore

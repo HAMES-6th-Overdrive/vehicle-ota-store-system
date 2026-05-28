@@ -133,8 +133,8 @@ typedef struct
     uint32_t expectedCrc32;
     uint32_t calculatedCrc32;
 
-    uint16_t expectedBlockIndex;
-    uint16_t lastBlockIndex;
+    uint32_t expectedBlockIndex;
+    uint32_t lastBlockIndex;
 
     uint8_t  expectedBlockSequenceCounter;
     uint8_t  lastBlockSequenceCounter;
@@ -214,5 +214,7 @@ boolean UdsOta_isDownloadInProgress(void);
  * @brief CRC 검증 완료 여부 확인
  */
 boolean UdsOta_isCrcVerified(void);
+
+
 
 #endif /* UDS_OTA_H_ */
