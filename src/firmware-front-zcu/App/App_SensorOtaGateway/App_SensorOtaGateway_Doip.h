@@ -71,8 +71,8 @@ typedef enum
    lwIP forward declaration
    ============================================================ */
 
-typedef struct tcp_pcb tcpPcb;
-typedef struct pbuf    pBuf;
+typedef struct tcp_pcb tcpPcb2;
+typedef struct pbuf    pBuf2;
 
 /* ============================================================
    DoIP session
@@ -81,8 +81,8 @@ typedef struct pbuf    pBuf;
 typedef struct
 {
     uint8    state;
-    tcpPcb *pcb;
-    pBuf   *p;
+    tcpPcb2 *pcb;
+    pBuf2   *p;
 
     uint8   rxBuf[APP_SENSOR_OTA_GATEWAY_DOIP_RX_BUF_SIZE];
     uint16  rxLen;

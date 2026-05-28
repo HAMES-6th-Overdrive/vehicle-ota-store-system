@@ -38,7 +38,7 @@
    Private variables
    ============================================================ */
 
-static tcpPcb *g_sensorOtaDoipPcb = NULL;
+static tcpPcb2 *g_sensorOtaDoipPcb = NULL;
 
 /* ============================================================
    Debug variables
@@ -71,37 +71,37 @@ volatile uint32 g_sensorOtaDoipLastUdsResLen = 0U;
    ============================================================ */
 
 static err_t AppSensorOtaGatewayDoip_Accept(void *arg,
-                                            tcpPcb *newPcb,
+                                            tcpPcb2 *newPcb,
                                             err_t err);
 
 static err_t AppSensorOtaGatewayDoip_Recv(void *arg,
-                                          tcpPcb *tpcb,
-                                          pBuf *p,
+                                          tcpPcb2 *tpcb,
+                                          pBuf2 *p,
                                           err_t err);
 
 static void AppSensorOtaGatewayDoip_Error(void *arg,
                                           err_t err);
 
 static err_t AppSensorOtaGatewayDoip_Poll(void *arg,
-                                          tcpPcb *tpcb);
+                                          tcpPcb2 *tpcb);
 
-static void AppSensorOtaGatewayDoip_Close(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_Close(tcpPcb2 *tpcb,
                                           AppSensorOtaGatewayDoip_Session_t *ds);
 
-static void AppSensorOtaGatewayDoip_Process(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_Process(tcpPcb2 *tpcb,
                                             AppSensorOtaGatewayDoip_Session_t *ds);
 
-static void AppSensorOtaGatewayDoip_HandleRoutingActivation(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_HandleRoutingActivation(tcpPcb2 *tpcb,
                                                             AppSensorOtaGatewayDoip_Session_t *ds,
                                                             uint8 *payload,
                                                             uint32 payloadLen);
 
-static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
                                                       AppSensorOtaGatewayDoip_Session_t *ds,
                                                       uint8 *payload,
                                                       uint32 payloadLen);
 
-static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
                                             uint8 *buf,
                                             uint16 len);
 
@@ -155,7 +155,7 @@ void AppSensorOtaGatewayDoip_Init(void)
    ============================================================ */
 
 static err_t AppSensorOtaGatewayDoip_Accept(void *arg,
-                                            tcpPcb *newPcb,
+                                            tcpPcb2 *newPcb,
                                             err_t err)
 {
     AppSensorOtaGatewayDoip_Session_t *ds;
@@ -188,8 +188,8 @@ static err_t AppSensorOtaGatewayDoip_Accept(void *arg,
 
 
 static err_t AppSensorOtaGatewayDoip_Recv(void *arg,
-                                          tcpPcb *tpcb,
-                                          pBuf *p,
+                                          tcpPcb2 *tpcb,
+                                          pBuf2 *p,
                                           err_t err)
 {
     AppSensorOtaGatewayDoip_Session_t *ds;
@@ -264,7 +264,7 @@ static void AppSensorOtaGatewayDoip_Error(void *arg,
 
 
 static err_t AppSensorOtaGatewayDoip_Poll(void *arg,
-                                          tcpPcb *tpcb)
+                                          tcpPcb2 *tpcb)
 {
     AppSensorOtaGatewayDoip_Session_t *ds;
 
@@ -285,7 +285,7 @@ static err_t AppSensorOtaGatewayDoip_Poll(void *arg,
 }
 
 
-static void AppSensorOtaGatewayDoip_Close(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_Close(tcpPcb2 *tpcb,
                                           AppSensorOtaGatewayDoip_Session_t *ds)
 {
     tcp_arg(tpcb, NULL);
@@ -307,7 +307,7 @@ static void AppSensorOtaGatewayDoip_Close(tcpPcb *tpcb,
    DoIP processing
    ============================================================ */
 
-static void AppSensorOtaGatewayDoip_Process(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_Process(tcpPcb2 *tpcb,
                                             AppSensorOtaGatewayDoip_Session_t *ds)
 {
     uint8 *buf;
@@ -387,7 +387,7 @@ static void AppSensorOtaGatewayDoip_Process(tcpPcb *tpcb,
 }
 
 
-static void AppSensorOtaGatewayDoip_HandleRoutingActivation(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_HandleRoutingActivation(tcpPcb2 *tpcb,
                                                             AppSensorOtaGatewayDoip_Session_t *ds,
                                                             uint8 *payload,
                                                             uint32 payloadLen)
@@ -438,7 +438,7 @@ static void AppSensorOtaGatewayDoip_HandleRoutingActivation(tcpPcb *tpcb,
 }
 
 
-static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
                                                       AppSensorOtaGatewayDoip_Session_t *ds,
                                                       uint8 *payload,
                                                       uint32 payloadLen)
@@ -581,7 +581,7 @@ static void AppSensorOtaGatewayDoip_BuildHeader(uint8 *buf,
 }
 
 
-static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb *tpcb,
+static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
                                             uint8 *buf,
                                             uint16 len)
 {

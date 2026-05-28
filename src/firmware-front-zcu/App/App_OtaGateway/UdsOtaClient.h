@@ -173,7 +173,7 @@
  *  - MainFunction이 1ms마다 호출되면 2000 = 2초
  */
 #define UDS_OTA_CLIENT_TIMEOUT_TICKS           2000U
-#define UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS  50000cccccccccccU
+#define UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS  50000U
 #define UDS_OTA_CLIENT_CRC_TIMEOUT_TICKS       10000U
 
 /* ============================================================
