@@ -129,6 +129,7 @@ class VehicleControlSnapshot:
     aeb: FeatureState
     control_payload_hex: str
     control_packet_hex: str
+    effective_control: dict[str, Any]
     updated_at: str
 
     def to_dict(self) -> dict:
@@ -861,6 +862,7 @@ class VehicleControl:
             aeb=feature_states["AEB"],
             control_payload_hex=control_payload.hex(" "),
             control_packet_hex=packet.hex(" "),
+            effective_control=self._effective_control_debug(joystick, feature_states["LKAS"], control_payload),
             updated_at=utc_now(),
         )
 
@@ -890,12 +892,65 @@ class VehicleControl:
 
         steer_byte = joystick.steer_byte
         if lkas is not None and lkas.enabled:
-            steer_byte = int(lkas.value.get("steer_byte", steer_byte))
+            steer_byte = VehicleControl._lkas_steer_byte(lkas, steer_byte)
 
         return bytes([
             clamp_byte(joystick.speed_byte),
             clamp_byte(steer_byte),
         ])
+
+    @staticmethod
+    def _lkas_steer_byte(lkas: FeatureState, fallback: int) -> int:
+        value = lkas.value if isinstance(lkas.value, dict) else {}
+
+        for key in (
+            "steer_byte",
+            "steering_byte",
+            "control_steer_byte",
+            "target_steer_byte",
+            "steer",
+        ):
+            if key not in value or value[key] is None:
+                continue
+            try:
+                return clamp_byte(int(value[key]))
+            except (TypeError, ValueError):
+                logger.warning("invalid LKAS %s value ignored: %r", key, value[key])
+
+        for key in ("steer_angle", "steering_angle", "target_angle", "angle"):
+            if key not in value or value[key] is None:
+                continue
+            try:
+                max_angle = float(value.get("max_angle", 20.0))
+                return angle_to_byte(float(value[key]), max_angle)
+            except (TypeError, ValueError):
+                logger.warning("invalid LKAS %s value ignored: %r", key, value[key])
+
+        return fallback
+
+    @staticmethod
+    def _effective_control_debug(
+        joystick: JoystickSignal,
+        lkas: FeatureState,
+        control_payload: bytes,
+    ) -> dict[str, Any]:
+        speed_byte = control_payload[0] if len(control_payload) >= 1 else None
+        steer_byte = control_payload[1] if len(control_payload) >= 2 else None
+        lkas_requested = joystick.gear != GEAR_P and bool(lkas.enabled)
+        lkas_steer = VehicleControl._lkas_steer_byte(lkas, joystick.steer_byte) if lkas_requested else None
+        if joystick.gear == GEAR_P:
+            steer_source = "park"
+        elif lkas_requested and lkas_steer == steer_byte:
+            steer_source = "lkas"
+        else:
+            steer_source = "joystick"
+        return {
+            "speed_byte": speed_byte,
+            "steer_byte": steer_byte,
+            "steer_source": steer_source,
+            "lkas_requested": lkas_requested,
+            "lkas_steer_byte": lkas_steer,
+        }
 
     @staticmethod
     def build_control_packet(
