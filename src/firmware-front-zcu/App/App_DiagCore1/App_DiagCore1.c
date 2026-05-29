@@ -31,6 +31,7 @@ static volatile uint32 g_done_count = 0u;
 static volatile uint32 g_busy_count = 0u;
 static volatile uint32 g_timeout_count = 0u;
 static volatile uint32 g_error_count = 0u;
+volatile boolean g_resetPending = pdFALSE;
 
 static boolean AppDiagCore1_WaitForIdle(uint32 timeoutMs);
 static boolean AppDiagCore1_WaitForDone(uint32 timeoutMs);
@@ -115,7 +116,6 @@ boolean AppDiagCore1_RequestBlocking(const uint8 *rxData,
 void AppDiagCore1_MainFunction(void)
 {
     uint16 localTxLen = 0u;
-    boolean resetPending;
     uint32 waitLoop;
 
     if (g_diagCore1.state != APP_DIAG_CORE1_STATE_PENDING)
@@ -142,14 +142,14 @@ void AppDiagCore1_MainFunction(void)
     }
 
     g_diagCore1.txLen = localTxLen;
-    resetPending = AppUds_ConsumeResetPending();
 
     __dsync();
     g_diagCore1.state = APP_DIAG_CORE1_STATE_DONE;
     __dsync();
 
-    if (resetPending == TRUE)
+    if (g_resetPending)
     {
+        AppCore1Debug_Push("Reset Pended!");
         /*
          * Core0 must copy and transmit the DoIP positive response first.
          * Wait until Core0 changes DONE -> IDLE, then reset.

@@ -3,6 +3,7 @@
 #include "App_DriveService/App_DriveService.h"
 #include "App_Eth/App_Eth.h"
 #include "App_InfoService/App_InfoService.h"
+#include "App_VehicleService/App_VehicleService.h"
 #include "task.h"
 #include <string.h>
 
@@ -16,12 +17,13 @@
 #define APP_SOMEIP_CLIENT_ID        (0x0002u)
 #define APP_SOMEIP_PORT             (30500u)
 
-#define APP_SOMEIP_SERVICE_COUNT    (4)
+#define APP_SOMEIP_SERVICE_COUNT    (5)
 
 #define APP_SOMEIP_DRIVE_SERVICE    (0x0001u)
 #define APP_SOMEIP_SENSOR_SERVICE   (0x0002u)
 #define APP_SOMEIP_AEB_SERVICE      (0x0006u)
 #define APP_SOMEIP_INFO_SERVICE     (0x0007u)
+#define APP_SOMEIP_VEHICLE_SERVICE  (0x0008u)
 
 static QueueHandle_t g_tx_queue;
 static TaskHandle_t g_someip_task_handle;
@@ -88,7 +90,14 @@ static BaseType_t AppSomeip_Init(void) {
                     .ip = "192.168.10.2",
                     .port = APP_SOMEIP_PORT
                 }
-            }
+            },
+            {
+                .service_id = APP_SOMEIP_VEHICLE_SERVICE,
+                .endpoint = {
+                    .ip = "192.168.10.2",
+                    .port = APP_SOMEIP_PORT
+                }
+            }            
         },
     };
 
@@ -104,6 +113,9 @@ static BaseType_t AppSomeip_Init(void) {
 
     g_app_routes[3].service_id = APP_SOMEIP_INFO_SERVICE;
     g_app_routes[3].get_rx_queue = AppInfoService_GetSomeipRxQueue;
+
+    g_app_routes[4].service_id = APP_SOMEIP_VEHICLE_SERVICE;
+    g_app_routes[4].get_rx_queue = AppVehicleService_GetSomeipRxQueue;    
 
     if(AppEth_IsReady() != pdPASS) return pdFAIL;
 

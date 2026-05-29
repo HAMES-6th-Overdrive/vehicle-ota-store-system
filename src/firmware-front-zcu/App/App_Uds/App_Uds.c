@@ -55,9 +55,6 @@ static uint32 g_downloadAddr = 0;
 static uint32 g_downloadSize = 0;
 static uint32 g_writtenBytes = 0;
 static uint8  g_blockSeq     = 0x01;   /* TransferData 순서 카운터 */
-static uint32  g_crcAddr     = 0;
-static uint32  g_crcSize     = 0;
-static boolean g_crcPending  = FALSE;
 static uint32  g_erasedUntil = 0;    /* next non-erased sector start, non-cached address */
 
 static IfxFlash_FlashType UDS_GetFlashTypeByAddr(uint32 addr)
@@ -92,34 +89,6 @@ static uint16 UDS_TransferExit      (uint8 *rx, uint16 rxLen, uint8 *tx);
 
 /*********************************************************************************************************************/
 /*---------------------------------------------Function Implementations----------------------------------------------*/
-boolean AppUds_ConsumeResetPending(void)
-{
-    boolean pending = g_crcPending;
-
-    if (pending == TRUE)
-    {
-        g_crcPending = FALSE;
-    }
-
-    return pending;
-}
-
-void AppUds_Task(void *arg)
-{
-    (void)arg;
-
-    for(;;)
-    {
-        if (AppUds_ConsumeResetPending() == TRUE)
-        {
-            vTaskDelay(pdMS_TO_TICKS(APP_UDS_TASK_PERIOD_MS));
-            IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
-        }
-        vTaskDelay(pdMS_TO_TICKS(APP_UDS_TASK_PERIOD_MS));
-    }
-}
-
-/* ── 외부 진입점 ────────────────────────────────────────────── */
 void UDS_HandleService(uint8  *rxData, uint16  rxLen,
                        uint8  *txData, uint16 *txLen)
 {
@@ -355,10 +324,6 @@ static uint16 UDS_TransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
                          ((uint32)rx[2] << 16) |
                          ((uint32)rx[3] <<  8) |
                          ((uint32)rx[4]);                               
-
-    g_crcAddr    = g_downloadAddr;
-    g_crcSize    = g_writtenBytes;
-    g_crcPending = TRUE;
 
     tx[0] = UDS_SID_TRANSFER_EXIT + UDS_POS_RESPONSE_OFFSET;  /* 0x77 */
 

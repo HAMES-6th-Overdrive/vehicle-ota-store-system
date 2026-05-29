@@ -29,6 +29,7 @@
 #include "IfxScuWdt.h"
 #include "App_DiagCore1/App_DiagCore1.h"
 #include "App_Debug/App_Core1Debug.h"
+#include "App_VehicleService/App_VehicleService.h"
 
 extern IfxCpu_syncEvent g_cpuSyncEvent;
 
@@ -58,6 +59,7 @@ void core1_main(void)
     Core1_DelayMs(1000u);
 
     AppDiagCore1_Init();
+    AppVehicleService_Start();
     AppCore1Debug_Push("CPU Core1 Started!");
 
     while(1)
