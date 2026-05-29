@@ -70,7 +70,8 @@ typedef enum
     APP_OTA_GATEWAY_CMD_START_DOWNLOAD_NO_CRC,
     APP_OTA_GATEWAY_CMD_PROVIDE_BLOCK,
     APP_OTA_GATEWAY_CMD_SET_FINAL_CRC,
-    APP_OTA_GATEWAY_CMD_CANCEL
+    APP_OTA_GATEWAY_CMD_CANCEL,
+    APP_OTA_GATEWAY_CMD_SENSOR_ECU_RESET
 } AppOtaGateway_CommandType_t;
 
 
@@ -488,6 +489,23 @@ BaseType_t AppOtaGateway_Cancel(TickType_t waitTicks)
     return result;
 }
 
+BaseType_t AppOtaGateway_RequestSensorEcuReset(TickType_t waitTicks)
+{
+    AppOtaGateway_Command_t cmd;
+    BaseType_t result;
+
+    if (g_appOtaCmdQueue == NULL)
+    {
+        return pdFAIL;
+    }
+
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.type = APP_OTA_GATEWAY_CMD_SENSOR_ECU_RESET;
+
+    result = xQueueSend(g_appOtaCmdQueue, &cmd, waitTicks);
+
+    return result;
+}
 
 boolean AppOtaGateway_IsBusy(void)
 {
@@ -874,6 +892,18 @@ static void AppOtaGateway_ProcessCommands(void)
             {
                 g_appOtaCmdCancelProcessedCount++;
                 (void)OtaGateway_Cancel();
+                break;
+            }
+            case APP_OTA_GATEWAY_CMD_SENSOR_ECU_RESET:
+            {
+                UdsOtaClient_Result_t resetResult;
+
+                resetResult = UdsOtaClient_RequestEcuReset();
+
+                if (resetResult != UDS_OTA_CLIENT_RESULT_OK)
+                {
+                }
+
                 break;
             }
 

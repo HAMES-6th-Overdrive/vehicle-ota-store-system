@@ -137,6 +137,8 @@ BaseType_t AppOtaGateway_ProvideBlock(uint32_t blockIndex,
  */
 BaseType_t AppOtaGateway_Cancel(TickType_t waitTicks);
 
+//0x11 단계에서 ECU Reset 요청 (jump to app)
+BaseType_t AppOtaGateway_RequestSensorEcuReset(TickType_t waitTicks);
 
 /* ============================================================
    상태 확인 API

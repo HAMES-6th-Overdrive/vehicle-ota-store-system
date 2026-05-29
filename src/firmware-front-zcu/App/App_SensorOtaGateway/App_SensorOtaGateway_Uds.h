@@ -70,7 +70,8 @@
 #define APP_SENSOR_OTA_GATEWAY_UDS_SID_REQUEST_DOWNLOAD    0x34U
 #define APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_DATA       0x36U
 #define APP_SENSOR_OTA_GATEWAY_UDS_SID_TRANSFER_EXIT       0x37U
-
+#define APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET 0x11U
+#define APP_SENSOR_OTA_GATEWAY_UDS_RESET_HARD_RESET 0x01U
 /* ============================================================
    Session types
    ============================================================ */

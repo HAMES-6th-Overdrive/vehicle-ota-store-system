@@ -173,7 +173,7 @@
  *  - MainFunction이 1ms마다 호출되면 2000 = 2초
  */
 #define UDS_OTA_CLIENT_TIMEOUT_TICKS           2000U
-#define UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS  50000cccccccccccU
+#define UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS  50000U
 #define UDS_OTA_CLIENT_CRC_TIMEOUT_TICKS       10000U
 
 /* ============================================================
@@ -329,6 +329,9 @@ UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize);
  *  - crc32 == 0x00000000도 이론상 유효한 CRC일 수 있으므로 reject하지 않는다.
  */
 UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32);
+
+//0x11 단계에서 ECU Reset 요청 (jump to app)
+UdsOtaClient_Result_t UdsOtaClient_RequestEcuReset(void);
 
 /**
  * @brief OTA Client main function

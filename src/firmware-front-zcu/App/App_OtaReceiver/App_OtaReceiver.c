@@ -394,6 +394,14 @@ BaseType_t AppOtaReceiver_Cancel(TickType_t waitTicks)
     return result;
 }
 
+BaseType_t AppOtaReceiver_RequestSensorEcuReset(TickType_t waitTicks)
+{
+    if (g_appOtaReceiverInitialized == FALSE)
+    {
+        return pdFAIL;
+    }
+    return AppOtaGateway_RequestSensorEcuReset(waitTicks);
+}
 
 /* ============================================================
    Gateway state helper

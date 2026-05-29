@@ -123,6 +123,8 @@ BaseType_t AppOtaReceiver_ProvideBlock(uint32_t blockIndex,
  */
 BaseType_t AppOtaReceiver_Cancel(TickType_t waitTicks);
 
+BaseType_t AppOtaReceiver_RequestSensorEcuReset(TickType_t waitTicks);
+
 /* ============================================================
    Gateway state helper
    ============================================================ */
