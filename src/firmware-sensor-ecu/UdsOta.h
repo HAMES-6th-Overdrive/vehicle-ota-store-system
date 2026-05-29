@@ -84,8 +84,10 @@ typedef enum
     UDS_OTA_STATE_TRANSFERRING,
     UDS_OTA_STATE_TRANSFER_EXIT_DONE,
     UDS_OTA_STATE_CRC_VERIFIED,
+    UDS_OTA_STATE_READY_TO_ACTIVATE,
     UDS_OTA_STATE_RESET_REQUESTED,
-    UDS_OTA_STATE_ERROR
+    UDS_OTA_STATE_ERROR,
+   
 } UdsOta_State_t;
 
 /* ============================================================

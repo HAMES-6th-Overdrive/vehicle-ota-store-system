@@ -101,9 +101,9 @@ static FlashOta_DebugInfo_t g_flashOtaDebug;
  *  - App/OTA 영역: write / read-back / CRC verify / flag 저장 / reset 요청
  *  - Bootloader 영역: flag 확인 / SOTA_UCB_SWAP / reset / rollback
  */
-static volatile boolean g_jumpPending = FALSE;
+static volatile boolean g_flagWritePending = FALSE;
+static volatile boolean g_resetPending = FALSE;
 static volatile uint8_t g_pendingResetType = 0U;
-
 /*
  * 실제 erase / write / CRC 대상 주소.
  *
@@ -144,7 +144,8 @@ void FlashOta_Reset(void)
     g_downloadTargetAddrNC = 0U;
     g_erasedUntilAddrNC = 0U;
 
-    g_jumpPending = FALSE;
+    g_flagWritePending = FALSE;
+    g_resetPending = FALSE;
     g_pendingResetType = 0U;
 }
 
@@ -437,14 +438,21 @@ boolean FlashOta_CheckCrc32(uint32_t expectedCrc32,
     return TRUE;
 }
 
-boolean FlashOta_RequestJumpToApp(uint8_t resetType)
+boolean FlashOta_RequestWritePendingFlag(void)
 {
-    /*
+#if 0
     if (g_flashOtaDebug.crcVerified == FALSE)
     {
         return FALSE;
-    }*/
+    }
+#endif
 
+    g_flagWritePending = TRUE;
+    return TRUE;
+}
+
+boolean FlashOta_RequestJumpToApp(uint8_t resetType)
+{
     /*
      * 현재 구조에서는 실제 App jump / UCB_SWAP을 수행하지 않는다.
      *
@@ -453,51 +461,44 @@ boolean FlashOta_RequestJumpToApp(uint8_t resetType)
      *  - 실행 전환은 Bootloader / SOTA_UCB_SWAP 담당
      */
     g_pendingResetType = resetType;
-    g_jumpPending = TRUE;
+    g_resetPending = TRUE;
 
     return TRUE;
 }
 
-boolean FlashOta_IsJumpPending(void)
-{
-    return g_jumpPending;
+boolean FlashOta_IsFlagWritePending(void){
+    return g_flagWritePending;
+}
+
+boolean FlashOta_IsResetPending(void){
+    return g_resetPending;
 }
 
 void FlashOta_Service(void)
 {
-    if (g_jumpPending == FALSE)
+    if (g_flagWritePending == TRUE)
     {
-        return;
+        g_flagWritePending = FALSE;
+
+        Sota_SetPendingUpdateFlag(
+            g_flashOtaDebug.firmwareSize,
+            g_flashOtaDebug.expectedCrc32
+        );
+
+        printf("Pending update flag set.\r\n");
+        printf("Firmware size: %u, Expected CRC32: %08X\r\n",
+               g_flashOtaDebug.firmwareSize,
+               g_flashOtaDebug.expectedCrc32);
     }
 
-    /*
-     * 기존 Single Slot OTA에서는 여기서 App으로 직접 jump했다.
-     *
-     * 하지만 현재는 Dual Slot / SOTA 구조이므로
-     * 절대 App에서 직접 jump하지 않는다.
-     *
-     * 최종 통합 시:
-     *  - OTA flag 저장
-     *  - system reset
-     *  - Bootloader가 flag 확인 후 SOTA_SWAP 수행
-     *
-     * 지금은 pending 상태만 정리한다.
-     */
-    delayMs(200U);
+    if (g_resetPending == TRUE)
+    {
+        g_resetPending = FALSE;
 
-    (void)g_pendingResetType;
-
-    Sota_SetPendingUpdateFlag(g_flashOtaDebug.firmwareSize,
-                              g_flashOtaDebug.expectedCrc32);
-    printf("Pending update flag set. Firmware size: %u, Expected CRC32: %08X\r\n",
-           g_flashOtaDebug.firmwareSize,
-           g_flashOtaDebug.expectedCrc32);    
-    delayMs(20U);
-
-    IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
-
-    g_jumpPending = FALSE;
-    g_pendingResetType = 0U;
+        delayMs(20U);
+        (void)g_pendingResetType;
+        IfxScuRcu_performReset(IfxScuRcu_ResetType_system, 0);
+    }
 }
 
 void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info)

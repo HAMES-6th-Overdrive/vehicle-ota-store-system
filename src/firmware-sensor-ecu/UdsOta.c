@@ -64,6 +64,7 @@ static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint1
 static boolean Target_RequestTransferExit(void);
 static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32);
 static boolean Target_EcuReset(uint8_t resetType);
+static boolean Target_PrepareActivation(void);
 static uint32_t selectInactiveSlotAddress(void)
 {
     if (Sota_IsGroupBActive() == TRUE)
@@ -73,6 +74,7 @@ static uint32_t selectInactiveSlotAddress(void)
 
     return FLASH_OTA_SLOT_B_START_ADDR_C;
 }
+
 /* ============================================================
    Public API
    ============================================================ */
@@ -706,8 +708,8 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
      * 0x71 응답을 먼저 queue에 올린 뒤 background FlashOta_Service()에서
      * flag 저장과 system reset을 수행한다.
      */
-    g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
-    (void)Target_EcuReset(UDS_RESET_JUMP_TO_APP);
+    g_udsOtaDebug.state = UDS_OTA_STATE_READY_TO_ACTIVATE;
+    //(void)Target_EcuReset(UDS_RESET_JUMP_TO_APP);
 }
 
 static void handleEcuReset(const uint8_t *payload, uint8_t length)
@@ -724,7 +726,7 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
         return;
     }
 
-    if (g_udsOtaDebug.state != UDS_OTA_STATE_CRC_VERIFIED)
+    if (g_udsOtaDebug.state != UDS_OTA_STATE_READY_TO_ACTIVATE)
     {
         sendNegativeResponse(UDS_SID_ECU_RESET,
                              UDS_NRC_CONDITIONS_NOT_CORRECT);
@@ -788,4 +790,8 @@ static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc
 static boolean Target_EcuReset(uint8_t resetType)
 {
     return FlashOta_RequestJumpToApp(resetType);
+}
+static boolean Target_PrepareActivation(void)
+{
+    return FlashOta_RequestWritePendingFlag();
 }

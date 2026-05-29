@@ -116,7 +116,10 @@ boolean FlashOta_RequestJumpToApp(uint8_t resetType);
 
 void FlashOta_GetDebugInfo(FlashOta_DebugInfo_t *info);
 
-boolean FlashOta_IsJumpPending(void);
 void FlashOta_Service(void);
+
+boolean FlashOta_IsFlagWritePending(void);
+boolean FlashOta_IsResetPending(void);
+boolean FlashOta_RequestWritePendingFlag(void);
 
 #endif /* FLASH_OTA_H_ */
