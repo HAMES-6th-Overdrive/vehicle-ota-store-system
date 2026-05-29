@@ -330,6 +330,9 @@ UdsOtaClient_Result_t UdsOtaClient_StartStreamWithoutCrc(uint32_t firmwareSize);
  */
 UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32);
 
+//0x11 단계에서 ECU Reset 요청 (jump to app)
+UdsOtaClient_Result_t UdsOtaClient_RequestEcuReset(void);
+
 /**
  * @brief OTA Client main function
  *

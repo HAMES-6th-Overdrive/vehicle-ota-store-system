@@ -413,6 +413,25 @@ UdsOtaClient_Result_t UdsOtaClient_SetFinalCrc(uint32_t crc32)
 }
 
 
+UdsOtaClient_Result_t UdsOtaClient_RequestEcuReset(void)
+{
+    /*
+     * Sensor ECU 쪽 0x31 RoutineControl CRC까지 끝난 뒤에만
+     * activation reset을 허용한다.
+     *
+     * 현재 Sensor ECU는 0x31 이후 CRC_VERIFIED / READY_TO_ACTIVATE 상태가 되고,
+     * 0x11을 받으면 reset하도록 수정한 구조다.
+     */
+    if (g_clientDebug.state != UDS_OTA_CLIENT_STATE_DONE)
+    {
+        return UDS_OTA_CLIENT_RESULT_BUSY;
+    }
+
+    setState(UDS_OTA_CLIENT_STATE_SEND_ECU_RESET);
+
+    return UDS_OTA_CLIENT_RESULT_OK;
+}
+
 /*
  * 현재 요청된 stream block을 제공한다.
  *
@@ -1126,7 +1145,9 @@ static void handleTransferDataResponse(void)
      */
     if (fetchResponse(resp, &len) == FALSE)
     {
-        if (checkTimeout(UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS) == TRUE)
+        const TickType_t timeoutTicks = UDS_OTA_CLIENT_TRANSFER_TIMEOUT_TICKS;
+
+        if (checkTimeout(timeoutTicks) == TRUE)
         {
             g_dbgTdRespTimeoutCount++;
         }

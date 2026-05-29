@@ -118,6 +118,7 @@ static uint16 handleSessionControl(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleRequestDownload(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx);
 static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx);
+static uint16 handleEcuReset(uint8 *rx, uint16 rxLen, uint8 *tx);
 
 static uint32 readU32Be(const uint8 *p);
 
@@ -127,6 +128,7 @@ static boolean waitUntilDoneOrError(uint32 timeoutMs);
 
 static void resetDownloadState(void);
 static uint8 nextBlockSeq(uint8 currentSeq);
+
 
 /* ============================================================
    Public functions
@@ -226,7 +228,11 @@ void AppSensorOtaGatewayUds_HandleService(uint8  *rxData,
             *txLen = handleTransferExit(rxData, rxLen, txData);
             break;
         }
-
+        case APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET:
+        {
+            *txLen = handleEcuReset(rxData, rxLen, txData);
+            break;
+        }
         default:
         {
             *txLen = makeNegativeResponse(txData,
@@ -523,7 +529,6 @@ static uint16 handleTransferData(uint8 *rx, uint16 rxLen, uint8 *tx)
     return 2U;
 }
 
-
 static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
 {
     uint32 expectedCrc;
@@ -619,6 +624,50 @@ static uint16 handleTransferExit(uint8 *rx, uint16 rxLen, uint8 *tx)
     return 1U;
 }
 
+static uint16 handleEcuReset(uint8 *rx, uint16 rxLen, uint8 *tx)
+{
+    BaseType_t resetResult;
+
+    if (rxLen < 2U)
+    {
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
+    }
+
+    if (rx[1] != APP_SENSOR_OTA_GATEWAY_UDS_RESET_HARD_RESET)
+    {
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE);
+    }
+
+    /*
+     * Sensor ECU OTA download/verify가 끝난 뒤에만 reset 가능해야 한다.
+     * UdsOtaClient_RequestEcuReset() 내부에서 state == DONE인지 검사한다.
+     */
+    resetResult = AppOtaReceiver_RequestSensorEcuReset(0U);
+
+    if (resetResult != pdPASS)
+    {
+        return makeNegativeResponse(tx,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET,
+                                    APP_SENSOR_OTA_GATEWAY_UDS_NRC_CONDITIONS_NOT_CORRECT);
+    }
+
+    /*
+     * 여기서의 0x51 응답은 "ZCU가 reset 요청을 접수했다"는 응답이다.
+     * 실제 Sensor ECU의 0x51은 UdsOtaClient 상태머신이 CAN 0x601로 받는다.
+     *
+     * 엄밀히는 Sensor ECU 0x51을 기다린 뒤 DoIP 0x51을 주는 게 맞지만,
+     * 테스트 단계에서는 접수 응답으로 먼저 확인해도 된다.
+     */
+    tx[0] = APP_SENSOR_OTA_GATEWAY_UDS_SID_ECU_RESET
+            + APP_SENSOR_OTA_GATEWAY_UDS_POS_RESPONSE_OFFSET;
+    tx[1] = rx[1];
+
+    return 2U;
+}
 /* ============================================================
    Helper functions
    ============================================================ */
