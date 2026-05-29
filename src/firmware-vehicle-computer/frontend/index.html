@@ -209,14 +209,15 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 
 /* AEB */
 .aeb-ov{position:fixed;inset:0;z-index:9000;background:rgba(255,30,30,.12);display:flex;align-items:center;justify-content:center;opacity:0;pointer-events:none}
-.aeb-ov.show{animation:aebf .4s forwards,aebfade 3s .7s forwards}
+.aeb-ov.show{opacity:1;pointer-events:all;animation:aebf .4s forwards}
 @keyframes aebf{0%,20%,40%,60%,80%{background:rgba(255,30,30,.4)}10%,30%,50%,70%,90%{background:rgba(255,30,30,.04)}100%{opacity:1;background:rgba(255,30,30,.1)}}
-@keyframes aebfade{0%{opacity:1}100%{opacity:0;pointer-events:none}}
 .aeb-box{background:rgba(8,0,0,.95);border:2px solid var(--red);border-radius:20px;padding:30px 42px;text-align:center;box-shadow:0 0 60px rgba(255,30,30,.5)}
 .aeb-icon{font-size:56px;display:block;margin-bottom:10px;animation:aebp .45s ease-in-out 5}
 @keyframes aebp{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
 .aeb-title{font-family:var(--font-head);font-size:24px;font-weight:800;color:var(--red);letter-spacing:3px;text-shadow:0 0 20px rgba(255,50,50,.8);margin-bottom:5px}
 .aeb-sub{font-size:12px;color:rgba(255,150,150,.8)}
+.aeb-close{margin-top:18px;border:1px solid rgba(255,80,80,.55);border-radius:10px;background:rgba(255,40,40,.16);color:#ffdede;padding:10px 22px;font:inherit;font-size:13px;font-weight:800;cursor:pointer}
+.aeb-close:hover{background:rgba(255,70,70,.25)}
 
 /* 루피 슬라이드인 알림 */
 .luffy-notif{position:fixed;top:68px;right:14px;z-index:800;width:280px;transform:translateX(300px);transition:transform .45s cubic-bezier(.34,1.56,.64,1)}
@@ -281,6 +282,8 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
       <div class="logo" id="logo-text">SMART VEHICLE</div>
       <div class="status-pills">
         <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷</span></div>
+        <div class="net-pill"><div class="ndot" id="vcpingdot"></div><span id="vcpinglabel">Vehicle Computer(192.168.10.1)</span></div>
+        <div class="net-pill"><div class="ndot" id="fzcpingdot"></div><span id="fzcpinglabel">Front ZCU(192.168.10.2)</span></div>
       </div>
     </div>
     <div class="hdr-center">
@@ -434,6 +437,7 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     <span class="aeb-icon">🚨</span>
     <div class="aeb-title">긴급 제동</div>
     <div class="aeb-sub">AEB 자동 긴급 제동 시스템 작동</div>
+    <button class="aeb-close" type="button" onclick="closeAebAlert()">닫기</button>
   </div>
 </div>
 
@@ -572,7 +576,7 @@ function dispatch(d) {
     case 'ota_done':          closeOv('ov-ota-prog'); toast(d.result.all_success?'✅ 업데이트 완료':'⚠️ 일부 실패'); break;
     case 'ota_skipped':       closeOv('ov-ota-confirm'); break;
     case 'ota_result_on_boot': showBootResult(d.result); break;
-    case 'aeb_triggered':     triggerAEB(); break;
+    case 'aeb_triggered':     showAebAlert(); break;
     case 'new_store_item':      onNewStoreItem(d.items); break;
     case 'theme_download_start': onThemeDownload(d); break;
     default: if(d.speed!==undefined) updateDash(d);
@@ -610,8 +614,11 @@ function updateDash(d) {
   // 네트워크
   const internet = d.network?.internet || {status: d.network?.status || 'checking'};
   const vehicleLink = d.network?.vehicle_computer || {status: 'disconnected'};
+  const pings = d.network?.pings || {};
   setInternet(internet);
   setVehicleLink(vehicleLink);
+  setPingPill('vcpingdot', 'vcpinglabel', pings.vehicle_computer, 'Vehicle Computer', '192.168.10.1');
+  setPingPill('fzcpingdot', 'fzcpinglabel', pings.front_zcu, 'Front ZCU', '192.168.10.2');
   document.getElementById('ss-internet').textContent = internetText(internet);
   document.getElementById('ss-vehicle-link').textContent = vehicleLinkText(vehicleLink);
 
@@ -766,6 +773,16 @@ function setInternet(state = {}) {
   const status = state.status || 'checking';
   setDotState(document.getElementById('ndot'), status);
   document.getElementById('nlabel').textContent = '인터넷';
+}
+
+function setPingPill(dotId, labelId, state = {}, name, fallbackHost) {
+  const dot = document.getElementById(dotId);
+  const label = document.getElementById(labelId);
+  if (!dot || !label) return;
+  const status = state?.status || 'checking';
+  const host = state?.host || state?.target || fallbackHost;
+  setDotState(dot, status);
+  label.textContent = `${name}(${host})`;
 }
 
 function setVehicleLink(state = {}) {
@@ -1021,14 +1038,17 @@ function closeLuffy(){document.getElementById('luffy-notif').classList.remove('s
 function triggerAEB() {
   const el=document.getElementById('aebov');
   el.classList.remove('show');void el.offsetWidth;el.classList.add('show');
-  setTimeout(()=>el.classList.remove('show'),4200);
 }
 
 function showAebAlert() {
   if(aebAlarmVisible) return;
   aebAlarmVisible = true;
   triggerAEB();
-  setTimeout(()=>{ aebAlarmVisible = false; }, 4200);
+}
+
+function closeAebAlert() {
+  document.getElementById('aebov').classList.remove('show');
+  aebAlarmVisible = false;
 }
 
 /* ════════════════════════
@@ -1105,7 +1125,7 @@ async function checkLatestVersions() {
   }
 }
 
-function demoAEB(){triggerAEB();toggleDemo();}
+function demoAEB(){showAebAlert();toggleDemo();}
 
 async function demoFvsaBuzzer() {
   toggleDemo();

@@ -76,6 +76,8 @@ VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
 VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
 VEHICLE_LINK_PING_INTERVAL_SECONDS = float(os.getenv("VEHICLE_LINK_PING_INTERVAL_SECONDS", "2"))
+VEHICLE_COMPUTER_PING_HOST = os.getenv("VEHICLE_COMPUTER_PING_HOST", HOST)
+FRONT_ZCU_PING_HOST = os.getenv("FRONT_ZCU_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_EVENT_HOST = os.getenv("VEHICLE_EVENT_HOST", "0.0.0.0")
 VEHICLE_EVENT_PORT = int(os.getenv("VEHICLE_EVENT_PORT", str(DEFAULT_VEHICLE_EVENT_PORT)))
 OTA_POLL_INTERVAL_SECONDS = float(os.getenv("VEHICLE_OTA_POLL_INTERVAL_SECONDS", "300"))
@@ -1359,7 +1361,9 @@ class FeatureStateStore:
         error: str | None,
         version: str | None = None,
     ) -> None:
-        self._catalog_item(feature_id)
+        item = self._catalog_item(feature_id)
+        if item.get("downloadable") and not item.get("package_required", True):
+            return
         with self._lock:
             data = self._load_unlocked()
             record = data["items"][feature_id]
@@ -2056,6 +2060,8 @@ def api_server_worker(
     packet_sender: VehiclePacketSender,
     internet_status: InternetConnectivityStatus,
     vehicle_link_ping: PingReachabilityStatus,
+    vehicle_computer_ping: PingReachabilityStatus,
+    front_zcu_ping: PingReachabilityStatus,
     feature_state_store: FeatureStateStore,
     ota_manager: OtaManager,
     host: str,
@@ -2171,7 +2177,8 @@ def api_server_worker(
 
         def refresh_feature_runtime(feature_id: str) -> None:
             if feature_id in ("AEB", "LKAS", "FVSA"):
-                vehicle_control.poll_once()
+                vehicle_control.reload_feature_state()
+                vehicle_control.refresh_feature_runtime(feature_id)
 
         ota_reset_session_lock = threading.Lock()
         ota_reset_session_id = 0
@@ -2512,6 +2519,10 @@ def api_server_worker(
                 "server_url": f"http://{host}:{port}",
                 "internet": internet,
                 "vehicle_computer": vehicle_link,
+                "pings": {
+                    "vehicle_computer": vehicle_computer_ping.snapshot(),
+                    "front_zcu": front_zcu_ping.snapshot(),
+                },
             }
             return payload
 
@@ -2587,6 +2598,10 @@ def api_server_worker(
             return {
                 "internet": internet_status.snapshot(),
                 "vehicle_computer": vehicle_computer_connection_payload(),
+                "pings": {
+                    "vehicle_computer": vehicle_computer_ping.snapshot(),
+                    "front_zcu": front_zcu_ping.snapshot(),
+                },
             }
 
         @app.get("/api/store/items")
@@ -2864,7 +2879,16 @@ def api_server_worker(
             result["reset_trigger"] = reset_trigger
             if not reset_trigger.get("success", True):
                 result["all_success"] = False
-            vehicle_control.poll_once()
+            refreshed = False
+            for ota_result in result.get("results", []):
+                if not isinstance(ota_result, dict) or not ota_result.get("success"):
+                    continue
+                feature_id = str(ota_result.get("feature_id") or "")
+                if feature_id in ("AEB", "LKAS", "FVSA"):
+                    refresh_feature_runtime(feature_id)
+                    refreshed = True
+            if not refreshed:
+                vehicle_control.poll_once()
             return {
                 "success": True,
                 "accepted": True,
@@ -3174,6 +3198,16 @@ def build_supervisor() -> Supervisor:
         timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
         enabled=VEHICLE_LINK_PING_ENABLED,
     )
+    vehicle_computer_ping = PingReachabilityStatus(
+        host=VEHICLE_COMPUTER_PING_HOST,
+        timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
+        enabled=VEHICLE_LINK_PING_ENABLED,
+    )
+    front_zcu_ping = PingReachabilityStatus(
+        host=FRONT_ZCU_PING_HOST,
+        timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
+        enabled=VEHICLE_LINK_PING_ENABLED,
+    )
 
     def set_flash_active(active: bool) -> None:
         reason = "ZCU flashing" if active else None
@@ -3218,6 +3252,8 @@ def build_supervisor() -> Supervisor:
                 packet_sender,
                 internet_status,
                 vehicle_link_ping,
+                vehicle_computer_ping,
+                front_zcu_ping,
                 feature_state_store,
                 ota_manager,
                 HOST,
@@ -3236,6 +3272,18 @@ def build_supervisor() -> Supervisor:
         ChildService(
             "vehicle-link-ping",
             vehicle_link_ping_worker(vehicle_link_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
+        )
+    )
+    supervisor.register(
+        ChildService(
+            "vehicle-computer-ping",
+            vehicle_link_ping_worker(vehicle_computer_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
+        )
+    )
+    supervisor.register(
+        ChildService(
+            "front-zcu-ping",
+            vehicle_link_ping_worker(front_zcu_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
         )
     )
     supervisor.register(

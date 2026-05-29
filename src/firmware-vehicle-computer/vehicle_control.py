@@ -684,6 +684,16 @@ class VehicleControl:
         with self._lock:
             self._sync_desired_enabled_from_store()
 
+    def refresh_feature_runtime(self, feature_id: str) -> None:
+        with self._lock:
+            self._reported_runtime_status.pop(feature_id, None)
+            feature = self._feature_runtime(feature_id)
+            feature.refresh()
+            self._report_runtime_status(feature)
+            feature_states = self._update_features(self._snapshot.joystick)
+            control_payload = self.build_control_payload(self._snapshot.joystick, feature_states["LKAS"])
+            self._snapshot = self._snapshot_from(self._snapshot.joystick, feature_states, control_payload)
+
     def _set_feature_enabled(self, feature_id: str, enabled: bool) -> None:
         if self._feature_state_store is not None:
             self._feature_state_store.set_feature_enabled(feature_id, enabled)
