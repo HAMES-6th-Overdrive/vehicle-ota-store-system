@@ -76,7 +76,6 @@ VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
 VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
 VEHICLE_LINK_PING_INTERVAL_SECONDS = float(os.getenv("VEHICLE_LINK_PING_INTERVAL_SECONDS", "2"))
-VEHICLE_COMPUTER_PING_HOST = os.getenv("VEHICLE_COMPUTER_PING_HOST", HOST)
 FRONT_ZCU_PING_HOST = os.getenv("FRONT_ZCU_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_EVENT_HOST = os.getenv("VEHICLE_EVENT_HOST", "0.0.0.0")
 VEHICLE_EVENT_PORT = int(os.getenv("VEHICLE_EVENT_PORT", str(DEFAULT_VEHICLE_EVENT_PORT)))
@@ -1550,6 +1549,7 @@ class VehicleStatus:
             return {
                 "type": "status",
                 "speed": speed,
+                "gear": self._gear,
                 "direction": "STOP" if speed == 0 else "DRIVE",
                 "time": time.strftime("%H:%M:%S"),
                 "date": time.strftime("%Y-%m-%d"),
@@ -2060,7 +2060,6 @@ def api_server_worker(
     packet_sender: VehiclePacketSender,
     internet_status: InternetConnectivityStatus,
     vehicle_link_ping: PingReachabilityStatus,
-    vehicle_computer_ping: PingReachabilityStatus,
     front_zcu_ping: PingReachabilityStatus,
     feature_state_store: FeatureStateStore,
     ota_manager: OtaManager,
@@ -2520,7 +2519,6 @@ def api_server_worker(
                 "internet": internet,
                 "vehicle_computer": vehicle_link,
                 "pings": {
-                    "vehicle_computer": vehicle_computer_ping.snapshot(),
                     "front_zcu": front_zcu_ping.snapshot(),
                 },
             }
@@ -2599,7 +2597,6 @@ def api_server_worker(
                 "internet": internet_status.snapshot(),
                 "vehicle_computer": vehicle_computer_connection_payload(),
                 "pings": {
-                    "vehicle_computer": vehicle_computer_ping.snapshot(),
                     "front_zcu": front_zcu_ping.snapshot(),
                 },
             }
@@ -3198,11 +3195,6 @@ def build_supervisor() -> Supervisor:
         timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
         enabled=VEHICLE_LINK_PING_ENABLED,
     )
-    vehicle_computer_ping = PingReachabilityStatus(
-        host=VEHICLE_COMPUTER_PING_HOST,
-        timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
-        enabled=VEHICLE_LINK_PING_ENABLED,
-    )
     front_zcu_ping = PingReachabilityStatus(
         host=FRONT_ZCU_PING_HOST,
         timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
@@ -3252,7 +3244,6 @@ def build_supervisor() -> Supervisor:
                 packet_sender,
                 internet_status,
                 vehicle_link_ping,
-                vehicle_computer_ping,
                 front_zcu_ping,
                 feature_state_store,
                 ota_manager,
@@ -3272,12 +3263,6 @@ def build_supervisor() -> Supervisor:
         ChildService(
             "vehicle-link-ping",
             vehicle_link_ping_worker(vehicle_link_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
-        )
-    )
-    supervisor.register(
-        ChildService(
-            "vehicle-computer-ping",
-            vehicle_link_ping_worker(vehicle_computer_ping, VEHICLE_LINK_PING_INTERVAL_SECONDS),
         )
     )
     supervisor.register(

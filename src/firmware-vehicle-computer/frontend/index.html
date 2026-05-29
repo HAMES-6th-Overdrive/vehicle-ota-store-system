@@ -131,7 +131,9 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 .arc-bg{fill:none;stroke:rgba(255,255,255,.06);stroke-width:7}
 .arc-fill{fill:none;stroke:var(--ac);stroke-width:7;stroke-linecap:round;stroke-dasharray:220;stroke-dashoffset:220;transition:stroke-dashoffset .7s ease}
 .gauge-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;padding-top:10px}
+.speed-readout{display:flex;align-items:center;justify-content:center;gap:7px;min-width:86px}
 .snum{font-family:var(--font-head);font-size:clamp(28px,5vw,40px);font-weight:800;color:var(--ac);line-height:1;min-width:2ch;text-align:center;transition:color .3s}
+.gearbadge{width:28px;height:28px;border-radius:8px;border:1px solid rgba(0,229,160,.32);background:rgba(0,229,160,.1);color:var(--ac2);display:flex;align-items:center;justify-content:center;font-family:var(--font-head);font-size:16px;font-weight:800;line-height:1}
 .sunit{font-size:9px;color:var(--txs);letter-spacing:2px}
 .dirbadge{margin-top:10px;padding:4px 16px;border-radius:20px;font-size:11px;font-weight:700;background:rgba(0,200,255,.1);color:var(--ac);border:1px solid rgba(0,200,255,.22)}
 
@@ -282,8 +284,8 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
       <div class="logo" id="logo-text">SMART VEHICLE</div>
       <div class="status-pills">
         <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷</span></div>
-        <div class="net-pill"><div class="ndot" id="vcpingdot"></div><span id="vcpinglabel">Vehicle Computer(192.168.10.1)</span></div>
-        <div class="net-pill"><div class="ndot" id="fzcpingdot"></div><span id="fzcpinglabel">Front ZCU(192.168.10.2)</span></div>
+        <div class="net-pill"><div class="ndot" id="vcpingdot"></div><span id="vcpinglabel">Vehicle Computer</span></div>
+        <div class="net-pill"><div class="ndot" id="fzcpingdot"></div><span id="fzcpinglabel">Front ZCU</span></div>
       </div>
     </div>
     <div class="hdr-center">
@@ -318,7 +320,10 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
             <path class="arc-fill" id="sarc" d="M18,92 A50,50 0 1,1 102,92"/>
           </svg>
           <div class="gauge-center">
-            <div class="snum" id="snum">0.0</div>
+            <div class="speed-readout">
+              <div class="snum" id="snum">0.0</div>
+              <div class="gearbadge" id="gearbadge">P</div>
+            </div>
             <div class="sunit">KM/H</div>
           </div>
         </div>
@@ -547,24 +552,36 @@ let lastAebTriggerCount = null;
 let ws;
 let debugTermWs = null;
 let flashPollTimer = null;
+let vehicleComputerClientStatus = 'checking';
+let lastVehicleComputerMessageAt = 0;
 
 /* ════════════════════════
    WebSocket
    ════════════════════════ */
 function connectWS() {
   ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onmessage = e => { try { dispatch(JSON.parse(e.data)); } catch(ex){ console.error(ex); } };
+  ws.onopen = () => setVehicleComputerClientStatus('connected');
+  ws.onmessage = e => {
+    setVehicleComputerClientStatus('connected');
+    try { dispatch(JSON.parse(e.data)); } catch(ex){ console.error(ex); }
+  };
   ws.onerror = () => {
-    setInternet({status:'checking'});
+    setVehicleComputerClientStatus('disconnected');
     setVehicleLink({status:'disconnected'});
   };
-  ws.onclose = () => setTimeout(connectWS, 3000);
+  ws.onclose = () => {
+    setVehicleComputerClientStatus('disconnected');
+    setTimeout(connectWS, 3000);
+  };
 }
 
 async function loadInitialStatus() {
   try {
     const r = await fetch('/api/status', {cache:'no-store'});
-    if(r.ok) updateDash(await r.json());
+    if(r.ok) {
+      setVehicleComputerClientStatus('connected');
+      updateDash(await r.json());
+    }
   } catch {}
 }
 
@@ -606,6 +623,7 @@ function updateDash(d) {
   // 속도 (Orbitron 고정폭으로 레이아웃 안 튐)
   const spd = Number(d.speed || 0);
   document.getElementById('snum').textContent = spd.toFixed(1);
+  document.getElementById('gearbadge').textContent = d.gear === 'D' ? 'D' : 'P';
   document.getElementById('dirbadge').textContent = d.direction || '정지';
   const arc = document.getElementById('sarc');
   arc.style.strokeDashoffset = 220 * (1 - Math.min(spd/60,1));
@@ -617,8 +635,8 @@ function updateDash(d) {
   const pings = d.network?.pings || {};
   setInternet(internet);
   setVehicleLink(vehicleLink);
-  setPingPill('vcpingdot', 'vcpinglabel', pings.vehicle_computer, 'Vehicle Computer', '192.168.10.1');
-  setPingPill('fzcpingdot', 'fzcpinglabel', pings.front_zcu, 'Front ZCU', '192.168.10.2');
+  setPingPill('vcpingdot', 'vcpinglabel', {status: vehicleComputerClientStatus}, 'Vehicle Computer');
+  setPingPill('fzcpingdot', 'fzcpinglabel', pings.front_zcu, 'Front ZCU');
   document.getElementById('ss-internet').textContent = internetText(internet);
   document.getElementById('ss-vehicle-link').textContent = vehicleLinkText(vehicleLink);
 
@@ -775,14 +793,25 @@ function setInternet(state = {}) {
   document.getElementById('nlabel').textContent = '인터넷';
 }
 
-function setPingPill(dotId, labelId, state = {}, name, fallbackHost) {
+function setVehicleComputerClientStatus(status) {
+  vehicleComputerClientStatus = status;
+  if (status === 'connected') lastVehicleComputerMessageAt = Date.now();
+  setPingPill('vcpingdot', 'vcpinglabel', {status}, 'Vehicle Computer');
+}
+
+setInterval(() => {
+  if (vehicleComputerClientStatus === 'connected' && Date.now() - lastVehicleComputerMessageAt > 4000) {
+    setVehicleComputerClientStatus('disconnected');
+  }
+}, 1000);
+
+function setPingPill(dotId, labelId, state = {}, name) {
   const dot = document.getElementById(dotId);
   const label = document.getElementById(labelId);
   if (!dot || !label) return;
   const status = state?.status || 'checking';
-  const host = state?.host || state?.target || fallbackHost;
   setDotState(dot, status);
-  label.textContent = `${name}(${host})`;
+  label.textContent = name;
 }
 
 function setVehicleLink(state = {}) {
