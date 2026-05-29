@@ -3,6 +3,7 @@
 #include "someip/light_someip.h"
 #include "App_Debug/App_Core1Debug.h"
 #include "task.h"
+#include "App_Can/App_Can.h"
 #include <string.h>
 
 #define APP_VEHICLESERVICE_TASK_STACK_SIZE (configMINIMAL_STACK_SIZE)
@@ -15,6 +16,8 @@ static QueueHandle_t g_vehicle_service_someip_rx_queue;
 
 static BaseType_t AppVehicleService_Init(void);
 static void AppVehicleService_Task(void *arg);
+
+const uint8_t vehicleService_payload[APP_DRIVESERVICE_CAN_DLC] = {0x11, 0x01};
 
 BaseType_t AppVehicleService_Start(void)
 {
@@ -51,10 +54,34 @@ static void AppVehicleService_Task(void *arg)
     {
         if (AppSomeip_Recv(g_vehicle_service_someip_rx_queue, &rx_msg) == pdPASS)
         {
-            g_resetPending = pdTRUE;            
-            AppCore1Debug_Push("g_resetPending!");
             AppCore1Debug_PushU32("method_id: ", rx_msg.packet.method_id);
-            AppCore1Debug_PushU32("message type: ", rx_msg.packet.message_type);
+
+            switch (rx_msg.packet.method_id) {
+                case 0x2001: {
+                    AppCore1Debug_Push("g_resetPending!");
+                    g_resetPending = pdTRUE;            
+                    __dsync();       
+                    break;
+                }
+
+                case 0x2002: {
+                    AppCan_SendClassic(APP_DRIVESERVICE_CAN_ID_RESET_DRIVE_ECU,
+                                                vehicleService_payload,
+                                                APP_DRIVESERVICE_CAN_DLC);                    
+                    break;
+                }
+                
+                case 0x2003: {
+                    AppCan_SendClassic(APP_DRIVESERVICE_CAN_ID_RESET_SENSOR_ECU,
+                                                vehicleService_payload,
+                                                APP_DRIVESERVICE_CAN_DLC);                    
+                    break;
+                }
+                
+                default: {
+                    break;
+                }                
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(1u));

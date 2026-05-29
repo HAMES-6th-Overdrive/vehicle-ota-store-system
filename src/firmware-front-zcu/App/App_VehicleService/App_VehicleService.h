@@ -5,6 +5,10 @@
 #include "queue.h"
 #include "Ifx_Types.h"
 
+#define APP_DRIVESERVICE_CAN_DLC 2
+#define APP_DRIVESERVICE_CAN_ID_RESET_DRIVE_ECU 0x610
+#define APP_DRIVESERVICE_CAN_ID_RESET_SENSOR_ECU 0x600
+
 BaseType_t AppVehicleService_Start(void);
 QueueHandle_t AppVehicleService_GetSomeipRxQueue(void);
 

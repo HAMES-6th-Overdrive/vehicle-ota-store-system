@@ -2,7 +2,7 @@
 #include "App_DoIP.h"
 #include "Ifx_Lwip.h"
 
-#define APP_ETH_TASK_STACK_SIZE (8192u)
+#define APP_ETH_TASK_STACK_SIZE (4096u)
 #define APP_ETH_TASK_PRIORITY   (2u)
 #define APP_ETH_TASK_PERIOD_MS (1u)
 #define APP_ETH_POWER_ON_DELAY_MS (1000u)
