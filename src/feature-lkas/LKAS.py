@@ -7,6 +7,10 @@ from collections import deque
 from typing import Any
 
 
+VERSION = "1.0.1"
+__version__ = VERSION
+
+
 class LKASFeature:
     def __init__(
         self,
@@ -35,11 +39,11 @@ class LKASFeature:
         self.sensitivity = sensitivity
         self.video_bind_host = video_bind_host or os.getenv("VEHICLE_CAMERA_BIND_HOST", "0.0.0.0")
         self.video_port = int(video_port or os.getenv("VEHICLE_CAMERA_VIDEO_PORT", "30501"))
-        self.camera_source_host = camera_source_host or os.getenv("VEHICLE_CAMERA_ECU_IP", "192.168.10.3")
-
+        self.camera_source_host = camera_source_host or os.getenv("VEHICLE_CAMERA_ECU_IP") or None
         self._angle_history = deque(maxlen=smooth_frames)
         self._lane_center_history = deque(maxlen=lane_smooth_frames)
         self._last_valid_angle = 0.0
+        self._last_frame: Any | None = None
         self._socket: socket.socket | None = None
         self._socket_error: str | None = None
         self._cv2: Any | None = None
@@ -50,14 +54,11 @@ class LKASFeature:
         if not enabled:
             self._reset_tracking()
             return self._manual_state(joystick, enabled=False, mode="manual")
-
         if joystick.gear != context["gear_d"]:
             self._reset_tracking()
             return self._state("parked", context["steer_center_byte"], 0.0, status="parked")
-
         if self._is_manual_steering(joystick, context):
             return self._manual_state(joystick, enabled=True, mode="manual override")
-
         if joystick.speed_byte >= self.speed_byte_threshold:
             return self._manual_state(joystick, enabled=True, mode="speed hold")
 
@@ -74,17 +75,12 @@ class LKASFeature:
         result = self._detect_lane(frame)
         if result["status"] == "ok" and result["steer_angle"] is not None:
             steer_angle = max(-self.max_angle, min(self.max_angle, result["steer_angle"]))
-            self._angle_history.append(steer_angle)
             self._last_valid_angle = steer_angle
         else:
             steer_angle = self._last_valid_angle
-            self._angle_history.append(steer_angle)
+        self._angle_history.append(steer_angle)
 
-        smooth_angle = (
-            float(sum(self._angle_history) / len(self._angle_history))
-            if self._angle_history
-            else 0.0
-        )
+        smooth_angle = float(sum(self._angle_history) / len(self._angle_history)) if self._angle_history else 0.0
         if abs(smooth_angle) < self.angle_deadzone:
             smooth_angle = 0.0
 
@@ -101,14 +97,11 @@ class LKASFeature:
     def _read_camera_frame(self) -> Any | None:
         cv2 = self._cv2_module()
         np = self._np_module()
-        if cv2 is None or np is None:
-            return None
-
         sock = self._video_socket()
-        if sock is None:
+        if cv2 is None or np is None or sock is None:
             return None
 
-        latest: Any | None = None
+        latest = None
         while True:
             try:
                 data, addr = sock.recvfrom(65535)
@@ -117,15 +110,15 @@ class LKASFeature:
             except OSError as exc:
                 self._socket_error = f"{type(exc).__name__}: {exc}"
                 break
-
             if self.camera_source_host and addr[0] != self.camera_source_host:
                 continue
-
             frame = cv2.imdecode(np.frombuffer(data, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
                 latest = cv2.resize(frame, self.image_size)
-
-        return latest
+        if latest is not None:
+            self._last_frame = latest
+            return latest
+        return self._last_frame
 
     def _detect_lane(self, frame: Any) -> dict[str, Any]:
         cv2 = self._cv2_module()
@@ -136,13 +129,10 @@ class LKASFeature:
         frame_h, frame_w = frame.shape[:2]
         roi_y = int(frame_h * self.roi_start_ratio)
         roi = frame[roi_y:frame_h, :]
-
         ycrcb = cv2.cvtColor(roi, cv2.COLOR_BGR2YCrCb)
         y, cr, cb = cv2.split(ycrcb)
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
-        y_eq = clahe.apply(y)
-        ycrcb_eq = cv2.merge([y_eq, cr, cb])
-        bgr_eq = cv2.cvtColor(ycrcb_eq, cv2.COLOR_YCrCb2BGR)
+        y_eq = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(y)
+        bgr_eq = cv2.cvtColor(cv2.merge([y_eq, cr, cb]), cv2.COLOR_YCrCb2BGR)
         blurred = cv2.GaussianBlur(bgr_eq, (3, 3), 0)
 
         ycrcb = cv2.cvtColor(blurred, cv2.COLOR_BGR2YCrCb)
@@ -152,72 +142,45 @@ class LKASFeature:
         red_mask = cv2.bitwise_and(cr_mask, cb_mask)
         _, y_mask = cv2.threshold(y, 60, 255, cv2.THRESH_BINARY)
         red_mask = cv2.bitwise_and(red_mask, y_mask)
-
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        closed = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
-        mask = cv2.morphologyEx(closed, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel), cv2.MORPH_OPEN, kernel)
 
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
         left_xs: list[int] = []
         right_xs: list[int] = []
         mid_x = frame_w // 2
-
         for contour in contours:
             if cv2.arcLength(contour, False) < 10:
                 continue
             for point in contour:
                 x = int(point[0][0])
-                if x < mid_x:
-                    left_xs.append(x)
-                else:
-                    right_xs.append(x)
+                (left_xs if x < mid_x else right_xs).append(x)
 
         lane_center = self._lane_center(left_xs, right_xs)
-        has_left = len(left_xs) >= 5
-        has_right = len(right_xs) >= 5
-        status = "ok" if has_left and has_right else "fail"
-
+        status = "ok" if len(left_xs) >= 5 and len(right_xs) >= 5 else "fail"
         if lane_center is not None:
             self._lane_center_history.append(lane_center)
         if self._lane_center_history:
             lane_center = int(sum(self._lane_center_history) / len(self._lane_center_history))
-
         if lane_center is None or status != "ok":
-            return {
-                "status": status,
-                "steer_angle": None,
-                "lane_center": lane_center,
-                "offset_px": None,
-            }
+            return {"status": status, "steer_angle": None, "lane_center": lane_center, "offset_px": None}
 
         offset = frame_w // 2 - lane_center - self.calibration_offset
         steer_angle = -(offset / (frame_w // 2)) * self.max_angle * self.sensitivity
-        return {
-            "status": status,
-            "steer_angle": float(steer_angle),
-            "lane_center": lane_center,
-            "offset_px": offset,
-        }
+        return {"status": status, "steer_angle": float(steer_angle), "lane_center": lane_center, "offset_px": offset}
 
     def _lane_center(self, left_xs: list[int], right_xs: list[int]) -> int | None:
         np = self._np_module()
         if np is None:
             return None
-
         left_mid = int(np.median(left_xs)) if len(left_xs) >= 5 else None
         right_mid = int(np.median(right_xs)) if len(right_xs) >= 5 else None
         if left_mid is not None and right_mid is not None:
             return (left_mid + right_mid) // 2
-        if left_mid is not None:
-            return left_mid
-        if right_mid is not None:
-            return right_mid
-        return None
+        return left_mid if left_mid is not None else right_mid
 
     def _is_manual_steering(self, joystick: Any, context: dict[str, Any]) -> bool:
-        if abs(getattr(joystick, "axis_steer", 0.0)) > self.steer_deadzone:
-            return True
-        return bool(context["is_manual_steering"](joystick))
+        return abs(getattr(joystick, "axis_steer", 0.0)) > self.steer_deadzone
 
     def _manual_state(self, joystick: Any, *, enabled: bool, mode: str) -> dict:
         return {
