@@ -42,7 +42,7 @@
 
 #define INTPRIO_ASCLIN0_TX      19                                          /* Priority of the ISR                  */
 
-#define ASC_TX_BUFFER_SIZE      64                                          /* Definition of the buffer size        */
+#define ASC_TX_BUFFER_SIZE      512                                          /* Definition of the buffer size        */
 
 /*********************************************************************************************************************/
 /*-------------------------------------------------Global variables--------------------------------------------------*/

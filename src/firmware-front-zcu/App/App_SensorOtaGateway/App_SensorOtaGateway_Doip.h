@@ -34,7 +34,7 @@
    DoIP config
    ============================================================ */
 
-#define APP_SENSOR_OTA_GATEWAY_DOIP_PORT                 13400U
+#define APP_SENSOR_OTA_GATEWAY_DOIP_PORT                 13401U
 #define APP_SENSOR_OTA_GATEWAY_DOIP_HEADER_LEN           8U
 #define APP_SENSOR_OTA_GATEWAY_DOIP_PROTOCOL_VERSION     0x02U
 #define APP_SENSOR_OTA_GATEWAY_DOIP_RX_BUF_SIZE          4096U

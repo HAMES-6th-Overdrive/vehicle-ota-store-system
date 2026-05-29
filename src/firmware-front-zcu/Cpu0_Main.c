@@ -69,7 +69,7 @@ IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 #define APP_FRONTZCU_VERSION "1.0.0"
 
 #define SENSOR_OTA_DOIP_INIT_DELAY_MS      2000U
-#define SENSOR_OTA_DOIP_TASK_STACK_SIZE    (configMINIMAL_STACK_SIZE + 256U)
+#define SENSOR_OTA_DOIP_TASK_STACK_SIZE    (configMINIMAL_STACK_SIZE)
 #define SENSOR_OTA_DOIP_TASK_PRIORITY      (tskIDLE_PRIORITY + 1U)
 
 static void init_led_pin(const IfxPort_Pin *pin);
@@ -108,6 +108,7 @@ void core0_main(void)
     /* SOTA 초기화: SWAPEN disabled이면 next entry에 Bank A marker를 기록하고 SWAPEN enable 후 reset */
     AppDebug_Init();
     SOTA_InitialSetup();
+    AppDebug_Init();
     
     /* Wait for CPU sync event */
     IfxCpu_emitEvent(&g_cpuSyncEvent);
@@ -153,7 +154,7 @@ void core0_main(void)
     app_assert_pass(AppSomeip_Start());
     app_assert_pass(AppInfoService_Start());
     app_assert_pass(AppSensorService_Start());
-        
+    
     AppCore1Debug_Init();
     AppCore1Debug_StartTask();
 
@@ -168,7 +169,7 @@ void core0_main(void)
                                 SENSOR_OTA_DOIP_TASK_STACK_SIZE,
                                 NULL,
                                 SENSOR_OTA_DOIP_TASK_PRIORITY,
-                                NULL));
+                                NULL)); 
 
     g_mainSensorOtaDoipInitTaskCreateCount++;
 
@@ -212,6 +213,8 @@ void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
 
 void vApplicationMallocFailedHook(void)
 {
+    AppDebug_Print("MALLOC FAILED");
+
     app_panic_loop();
 }
 
