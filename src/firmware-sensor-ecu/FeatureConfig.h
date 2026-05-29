@@ -7,7 +7,7 @@
  * 1: enable
  */
 
-#define FEATURE_TOF_SENSOR          0U
+#define FEATURE_TOF_SENSOR          1U
 #define FEATURE_AEB                 1U
 #define FEATURE_FRONT_START_ALERT   1U
 
