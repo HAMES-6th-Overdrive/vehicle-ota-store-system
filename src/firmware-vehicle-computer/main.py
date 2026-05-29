@@ -71,6 +71,10 @@ INTERNET_CHECK_HOST = os.getenv("VEHICLE_INTERNET_CHECK_HOST", "8.8.8.8")
 INTERNET_CHECK_PORT = int(os.getenv("VEHICLE_INTERNET_CHECK_PORT", "53"))
 INTERNET_CHECK_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_INTERNET_CHECK_TIMEOUT_SECONDS", "0.75"))
 INTERNET_CHECK_INTERVAL_SECONDS = float(os.getenv("VEHICLE_INTERNET_CHECK_INTERVAL_SECONDS", "2"))
+WEATHER_LATITUDE = float(os.getenv("VEHICLE_WEATHER_LATITUDE", "37.5665"))
+WEATHER_LONGITUDE = float(os.getenv("VEHICLE_WEATHER_LONGITUDE", "126.9780"))
+WEATHER_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_WEATHER_TIMEOUT_SECONDS", "3"))
+WEATHER_CACHE_SECONDS = float(os.getenv("VEHICLE_WEATHER_CACHE_SECONDS", "600"))
 VEHICLE_COMM_STALE_SECONDS = float(os.getenv("VEHICLE_COMM_STALE_SECONDS", "7.5"))
 FIRMWARE_VERSION_POLL_INTERVAL_SECONDS = float(
     os.getenv("VEHICLE_FIRMWARE_VERSION_POLL_INTERVAL_SECONDS", "5")
@@ -1882,6 +1886,67 @@ def api_server_worker(
             filename: str
             content_base64: str
 
+        weather_cache: dict[str, Any] = {"payload": None, "fetched_at": 0.0}
+
+        def fallback_weather(error: str | None = None) -> dict:
+            payload = {
+                "current": {
+                    "temperature_2m": 20,
+                    "apparent_temperature": 20,
+                    "relative_humidity_2m": 50,
+                    "wind_speed_10m": 0,
+                    "visibility": 10000,
+                    "weather_code": 0,
+                },
+                "source": "fallback",
+            }
+            if error:
+                payload["error"] = error
+            return payload
+
+        def fetch_weather() -> dict:
+            cached = weather_cache.get("payload")
+            fetched_at = float(weather_cache.get("fetched_at") or 0.0)
+            if isinstance(cached, dict) and time.time() - fetched_at < WEATHER_CACHE_SECONDS:
+                return {**cached, "cached": True}
+
+            import urllib.parse
+            import urllib.request
+
+            query = urllib.parse.urlencode(
+                {
+                    "latitude": WEATHER_LATITUDE,
+                    "longitude": WEATHER_LONGITUDE,
+                    "current": ",".join(
+                        [
+                            "temperature_2m",
+                            "apparent_temperature",
+                            "relative_humidity_2m",
+                            "wind_speed_10m",
+                            "visibility",
+                            "weather_code",
+                        ]
+                    ),
+                    "timezone": "auto",
+                }
+            )
+            url = f"https://api.open-meteo.com/v1/forecast?{query}"
+            try:
+                with urllib.request.urlopen(url, timeout=WEATHER_TIMEOUT_SECONDS) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                current = data.get("current")
+                if not isinstance(current, dict):
+                    raise RuntimeError("weather response missing current data")
+                payload = {"current": current, "source": "open-meteo"}
+                weather_cache["payload"] = payload
+                weather_cache["fetched_at"] = time.time()
+                return payload
+            except Exception as exc:
+                if isinstance(cached, dict):
+                    return {**cached, "cached": True, "source": "cache", "error": str(exc)}
+                logger.warning("weather fetch failed: %s", exc)
+                return fallback_weather(str(exc))
+
         def refresh_feature_runtime(feature_id: str) -> None:
             if feature_id in ("AEB", "LKAS", "FVSA"):
                 vehicle_control.poll_once()
@@ -2253,16 +2318,7 @@ def api_server_worker(
         @app.get("/api/weather")
         async def dashboard_weather() -> dict:
             heartbeat()
-            return {
-                "current": {
-                    "temperature_2m": 0,
-                    "apparent_temperature": 0,
-                    "relative_humidity_2m": 0,
-                    "wind_speed_10m": 0,
-                    "visibility": 10000,
-                    "weather_code": 0,
-                }
-            }
+            return await run_in_threadpool(fetch_weather)
 
         @app.get("/api/theme-available/{theme_id}")
         async def theme_available(theme_id: str) -> dict:

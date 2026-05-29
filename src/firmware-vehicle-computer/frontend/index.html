@@ -277,8 +277,8 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     <div class="top-left">
       <div class="logo" id="logo-text">SMART VEHICLE</div>
       <div class="status-pills">
-        <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷 확인 중...</span></div>
-        <div class="net-pill"><div class="ndot" id="vcdot"></div><span id="vclabel">Vehicle Computer 확인 중...</span></div>
+        <div class="net-pill"><div class="ndot" id="ndot"></div><span id="nlabel">인터넷</span></div>
+        <div class="net-pill"><div class="ndot" id="vcdot"></div><span id="vclabel">Vehicle Computer</span></div>
       </div>
     </div>
     <div class="hdr-center">
@@ -751,19 +751,13 @@ function setDotState(dot, status) {
 function setInternet(state = {}) {
   const status = state.status || 'checking';
   setDotState(document.getElementById('ndot'), status);
-  document.getElementById('nlabel').textContent =
-    status === 'connected' ? '인터넷 연결' :
-    status === 'checking' ? '인터넷 확인 중' :
-    '인터넷 미연결';
+  document.getElementById('nlabel').textContent = '인터넷';
 }
 
 function setVehicleLink(state = {}) {
   const status = state.status || 'disconnected';
   setDotState(document.getElementById('vcdot'), status);
-  document.getElementById('vclabel').textContent =
-    status === 'connected' ? 'Vehicle Computer 연결' :
-    status === 'transmitting' ? 'Vehicle Computer 송신 중' :
-    'Vehicle Computer 미수신';
+  document.getElementById('vclabel').textContent = 'Vehicle Computer';
 }
 
 function internetText(state = {}) {
