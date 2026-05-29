@@ -592,7 +592,7 @@ class VehicleControl:
                 "smooth_frames": 5,
                 "lane_smooth_frames": 10,
                 "speed_byte_threshold": 117,
-                "sensitivity": 3.0,
+                "sensitivity": 2.5,
             },
         )
         self._fvsa = DownloadedPythonFeature(

@@ -254,7 +254,7 @@ STORE_CATALOG = [
         "full_name": "차선 유지 보조",
         "description": "차선 중앙 주행을 돕는 보조 기능입니다.",
         "kind": "feature",
-        "latest_version": "1.0.0",
+        "latest_version": "1.3.0",
         "downloadable": True,
         "download_file": "LKAS.py",
         "runtime_class": "LKASFeature",
