@@ -143,14 +143,14 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 
 /* 날씨 */
 .wpanel{padding:10px 14px;flex:.65;min-height:0}
-.wmain{display:flex;align-items:center;gap:10px;margin-bottom:7px}
+.wmain{display:grid;grid-template-columns:auto minmax(86px,1fr) 1.15fr;align-items:center;gap:10px;margin-bottom:0}
 .wicon{font-size:clamp(26px,3.2vw,34px);filter:drop-shadow(0 0 10px rgba(0,200,255,.25));line-height:1}
 .wtemp{font-family:var(--font-head);font-size:clamp(20px,3vw,26px);font-weight:800}
 .wunit{font-size:12px;color:var(--txs)}
-.wdesc{font-size:11px;color:var(--txs);margin-top:1px}
-.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
-.wrow{font-size:9px;color:var(--txs);display:flex;align-items:center;gap:3px}
-.wrow span{color:var(--tx);font-weight:500}
+.wdesc{font-size:12px;color:var(--txs);margin-top:1px}
+.wgrid{display:grid;grid-template-columns:1fr 1fr;gap:5px 8px}
+.wrow{font-size:11px;color:var(--txs);display:flex;align-items:center;justify-content:space-between;gap:4px;white-space:nowrap}
+.wrow span{color:var(--tx);font-weight:700}
 
 /* ══ 오른쪽: 시스템 상태 ══ */
 .syspanel{padding:14px 16px;height:100%;display:flex;flex-direction:column}
@@ -348,12 +348,12 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
             </div>
             <div class="wdesc" id="wdesc">불러오는 중...</div>
           </div>
-        </div>
-        <div class="wgrid">
-          <div class="wrow">💧 습도 <span id="whum">--%</span></div>
-          <div class="wrow">💨 바람 <span id="wwind">--</span></div>
-          <div class="wrow">🌡️ 체감 <span id="wfeel">--°C</span></div>
-          <div class="wrow">👁️ 가시 <span id="wvis">-- km</span></div>
+          <div class="wgrid">
+            <div class="wrow">습도 <span id="whum">--%</span></div>
+            <div class="wrow">바람 <span id="wwind">--</span></div>
+            <div class="wrow">체감 <span id="wfeel">--°C</span></div>
+            <div class="wrow">가시 <span id="wvis">-- km</span></div>
+          </div>
         </div>
       </div>
     </div>
@@ -363,8 +363,6 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
       <div class="panel syspanel">
         <div class="plabel">시스템 상태</div>
         <div style="flex:1;display:flex;flex-direction:column">
-          <div class="srow"><span class="slabel">인터넷</span><span class="sval" id="ss-internet" style="font-size:10px">-</span></div>
-          <div class="srow"><span class="slabel">Vehicle Computer 연결</span><span class="sval" id="ss-vehicle-link" style="font-size:10px">-</span></div>
           <div class="srow"><span class="slabel">구매 기능</span><span class="sval" id="ss-pur">-</span></div>
           <div class="srow"><span class="slabel">Vehicle Computer FW</span><span class="sval" id="ss-fw-vehicle-computer">-</span></div>
           <div class="srow"><span class="slabel">ZCU FW</span><span class="sval" id="ss-fw-zcu">-</span></div>
@@ -648,9 +646,6 @@ function updateDash(d) {
   setVehicleLink(vehicleLink);
   setPingPill('vcpingdot', 'vcpinglabel', {status: vehicleComputerClientStatus}, 'Vehicle Computer');
   setPingPill('fzcpingdot', 'fzcpinglabel', pings.front_zcu, 'Front ZCU');
-  document.getElementById('ss-internet').textContent = internetText(internet);
-  document.getElementById('ss-vehicle-link').textContent = vehicleLinkText(vehicleLink);
-
   // 시스템
   const pur = d.purchased||[];
   document.getElementById('ss-pur').textContent = `${pur.length}개`;
