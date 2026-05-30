@@ -981,7 +981,7 @@ static void FlashOta_ServiceEraseInactiveSlot(void)
             g_flashOtaWriteDebug.eraseCount++;
             g_flashOtaDebug.eraseCount++;
 
-            g_asyncEraseCurrentNc += FLASH_OTA_SECTOR_SIZE_BYTES;
+            g_asyncEraseCurrentNc += FLASH_OTA_MAX_IMAGE_SIZE;
 
             if (g_asyncEraseCurrentNc >= g_asyncEraseEndNc)
             {
@@ -1042,7 +1042,7 @@ static void FlashOta_ServiceEraseInactiveSlot(void)
     SensorOtaEraseWorker_ClearResult();
 
     if (SensorOtaEraseWorker_Request(g_asyncEraseCurrentNc,
-                                      FLASH_OTA_SECTOR_SIZE_BYTES,
+                                      FLASH_OTA_MAX_IMAGE_SIZE,
                                       flashType) == FALSE)
     {
         g_flashOtaCpu1EraseErrorCount++;

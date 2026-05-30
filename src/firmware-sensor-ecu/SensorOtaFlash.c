@@ -7,7 +7,7 @@
 
 typedef struct
 {
-    void  (*eraseSectorCmd)(uint32 sectorAddr);
+    void  (*eraseSectorCmd)(uint32 sectorAddr, uint32 count);
     uint8 (*waitUnbusy)(uint32 flash, IfxFlash_FlashType flashType);
     uint8 (*enterPageMode)(uint32 pageAddr);
     void  (*load2X32bits)(uint32 pageAddr, uint32 wordL, uint32 wordU);
@@ -26,7 +26,7 @@ static boolean eraseInternal(uint32 addr,
                              IfxFlash_FlashType flashType,
                              boolean haltOtherCores);
 
-static void eraseOneSectorCommand(uint32 sectorAddr)
+static void eraseSectorsCommand(uint32 sectorAddr, uint32 count)
 {
     volatile uint32 *addr1 = (volatile uint32 *)(IFXFLASH_CMD_BASE_ADDRESS | 0xaa50U);
     volatile uint32 *addr2 = (volatile uint32 *)(IFXFLASH_CMD_BASE_ADDRESS | 0xaa58U);
@@ -34,24 +34,48 @@ static void eraseOneSectorCommand(uint32 sectorAddr)
     volatile uint32 *addr4 = (volatile uint32 *)(IFXFLASH_CMD_BASE_ADDRESS | 0xaaa8U);
 
     *addr1 = sectorAddr;
-    *addr2 = 1U;
+    *addr2 = count;
     *addr3 = 0x80U;
     *addr4 = 0x50U;
 
     __dsync();
 }
 
-static uint32 eraseWrapper(uint32 sectorAddr, uint32 sectorCount, IfxFlash_FlashType flashType)
+static uint32 eraseWrapper(uint32 sectorAddr,
+                           uint32 sectorCount,
+                           IfxFlash_FlashType flashType)
 {
-    uint16 pw = IfxScuWdt_getSafetyWatchdogPasswordInline();
     uint32 err = 0U;
+    uint32 erasedSectors = 0U;
 
-    for (uint32 i = 0U; i < sectorCount; i++)
+    while (erasedSectors < sectorCount)
     {
-        uint32 addr = sectorAddr + (i * SENSOR_OTA_PFLASH_SECTOR_SIZE);
+        uint32 addr = sectorAddr + (erasedSectors * SENSOR_OTA_PFLASH_SECTOR_SIZE);
+        uint32 sectorsLeft = sectorCount - erasedSectors;
+
+        uint32 nextPhysicalBoundary =
+            (addr & ~(SENSOR_OTA_PFLASH_PHYSICAL_SECTOR_SIZE - 1U)) +
+            SENSOR_OTA_PFLASH_PHYSICAL_SECTOR_SIZE;
+
+        uint32 bytesUntilBoundary = nextPhysicalBoundary - addr;
+        uint32 sectorsUntilBoundary = bytesUntilBoundary / SENSOR_OTA_PFLASH_SECTOR_SIZE;
+
+        uint32 eraseCount = sectorsLeft;
+        eraseCount = (eraseCount > SENSOR_OTA_MAX_ERASE_SECTORS_PER_CMD) ? SENSOR_OTA_MAX_ERASE_SECTORS_PER_CMD : eraseCount;
+        eraseCount = (eraseCount > sectorsUntilBoundary) ? sectorsUntilBoundary : eraseCount;
+
+        if (eraseCount == 0U)
+        {
+            err = 0xFFFFFFFFU;
+            break;
+        }
+
+        IfxFlash_clearStatus(SENSOR_OTA_FLASH_MODULE);
+
+        uint16 pw = IfxScuWdt_getSafetyWatchdogPasswordInline();
 
         IfxScuWdt_clearSafetyEndinitInline(pw);
-        g_func.eraseSectorCmd(addr);
+        g_func.eraseSectorCmd(addr, eraseCount);
         IfxScuWdt_setSafetyEndinitInline(pw);
 
         g_func.waitUnbusy(SENSOR_OTA_FLASH_MODULE, flashType);
@@ -61,6 +85,8 @@ static uint32 eraseWrapper(uint32 sectorAddr, uint32 sectorCount, IfxFlash_Flash
         {
             break;
         }
+
+        erasedSectors += eraseCount;
     }
 
     return err;
@@ -92,7 +118,7 @@ static void copyFuncsToPspr(void)
         return;
     }
 
-    memcpy((void *)SENSOR_OTA_ERASESECTOR_ADDR,   (const void *)eraseOneSectorCommand, SENSOR_OTA_ERASESECTOR_LEN);
+    memcpy((void *)SENSOR_OTA_ERASESECTOR_ADDR,   (const void *)eraseSectorsCommand, SENSOR_OTA_ERASESECTOR_LEN);
     memcpy((void *)SENSOR_OTA_WAITUNBUSY_ADDR,    (const void *)IfxFlash_waitUnbusy,   SENSOR_OTA_WAITUNBUSY_LEN);
     memcpy((void *)SENSOR_OTA_ENTERPAGEMODE_ADDR, (const void *)IfxFlash_enterPageMode, SENSOR_OTA_ENTERPAGEMODE_LEN);
     memcpy((void *)SENSOR_OTA_LOAD2X32_ADDR,      (const void *)IfxFlash_loadPage2X32, SENSOR_OTA_LOAD2X32_LEN);
@@ -173,6 +199,7 @@ static boolean eraseInternal(uint32 addr,
     IfxFlash_clearStatus(SENSOR_OTA_FLASH_MODULE);
 
     err = g_func.eraseWrapper(alignedAddr, sectorCount, flashType);
+
     if (err == 0U)
     {
         err = MODULE_DMU.HF_ERRSR.U;
