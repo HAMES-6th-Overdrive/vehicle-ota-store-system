@@ -19,6 +19,13 @@ typedef struct
 static SensorOtaFlashFunc_t g_func;
 static boolean g_funcCopied = FALSE;
 
+static void copyFuncsToPspr(void);
+
+static boolean eraseInternal(uint32 addr,
+                             uint32 size,
+                             IfxFlash_FlashType flashType,
+                             boolean haltOtherCores);
+
 static void eraseOneSectorCommand(uint32 sectorAddr)
 {
     volatile uint32 *addr1 = (volatile uint32 *)(IFXFLASH_CMD_BASE_ADDRESS | 0xaa50U);
@@ -104,7 +111,41 @@ static void copyFuncsToPspr(void)
     g_funcCopied = TRUE;
 }
 
+/*
+ * 기존 동기 erase 경로.
+ *
+ * 기존 동작을 유지한다:
+ *  - CPU1 halt
+ *  - CPU2 halt
+ *  - 현재 core interrupt disable
+ *  - PFLASH erase 수행
+ */
 boolean SensorOtaFlash_Erase(uint32 addr, uint32 size, IfxFlash_FlashType flashType)
+{
+    return eraseInternal(addr, size, flashType, TRUE);
+}
+
+/*
+ * CPU1 worker용 erase 경로.
+ *
+ * 차이점:
+ *  - 다른 core를 halt하지 않는다.
+ *
+ * 아직 이 함수는 호출하지 않는다.
+ * 이번 1단계에서는 기존 OTA 동작을 유지하면서,
+ * 나중에 CPU1 erase worker에서 사용할 API만 추가한다.
+ */
+boolean SensorOtaFlash_EraseNoCoreHalt(uint32 addr,
+                                        uint32 size,
+                                        IfxFlash_FlashType flashType)
+{
+    return eraseInternal(addr, size, flashType, FALSE);
+}
+
+static boolean eraseInternal(uint32 addr,
+                             uint32 size,
+                             IfxFlash_FlashType flashType,
+                             boolean haltOtherCores)
 {
     uint32 flashAddr;
     uint32 alignedAddr;
@@ -113,8 +154,11 @@ boolean SensorOtaFlash_Erase(uint32 addr, uint32 size, IfxFlash_FlashType flashT
     uint32 err;
     boolean irq;
 
-    IfxCpu_setCoreMode(&MODULE_CPU1, IfxCpu_CoreMode_halt);
-    IfxCpu_setCoreMode(&MODULE_CPU2, IfxCpu_CoreMode_halt);
+    if (haltOtherCores == TRUE)
+    {
+        IfxCpu_setCoreMode(&MODULE_CPU1, IfxCpu_CoreMode_halt);
+        IfxCpu_setCoreMode(&MODULE_CPU2, IfxCpu_CoreMode_halt);
+    }
 
     copyFuncsToPspr();
 

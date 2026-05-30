@@ -29,6 +29,16 @@
 #define SENSOR_OTA_WRITEWRAPPER_ADDR   (SENSOR_OTA_ERASEWRAPPER_ADDR  + SENSOR_OTA_ERASEWRAPPER_LEN)
 
 boolean SensorOtaFlash_Erase(uint32 addr, uint32 size, IfxFlash_FlashType flashType);
+
+/*
+ * CPU1 erase worker용 API.
+ * 기존 SensorOtaFlash_Erase()와 달리 CPU1/CPU2를 halt하지 않는다.
+ * 1단계에서는 선언/구현만 추가하고 아직 호출하지 않는다.
+ */
+boolean SensorOtaFlash_EraseNoCoreHalt(uint32 addr,
+                                        uint32 size,
+                                        IfxFlash_FlashType flashType);
+
 boolean SensorOtaFlash_Write(uint32 addr, const uint8 *data, uint16 len, IfxFlash_FlashType flashType);
 
 #endif /* SENSOR_OTA_FLASH_H_ */

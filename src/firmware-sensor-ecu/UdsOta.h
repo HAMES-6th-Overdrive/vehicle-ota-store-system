@@ -80,6 +80,7 @@ typedef enum
 {
     UDS_OTA_STATE_IDLE = 0,
     UDS_OTA_STATE_PROGRAMMING_SESSION,
+    UDS_OTA_STATE_DOWNLOAD_ERASING,
     UDS_OTA_STATE_DOWNLOAD_REQUESTED,
     UDS_OTA_STATE_TRANSFERRING,
     UDS_OTA_STATE_TRANSFER_EXIT_DONE,
@@ -178,6 +179,15 @@ void UdsOta_reset(void);
  * @param length  CAN FD payload length
  */
 void UdsOta_onRequest(const uint8_t *payload, uint8_t length);
+
+/**
+ * @brief UDS OTA background service
+ *
+ * 0x34 RequestDownload에서 erase를 비동기 시작한 뒤,
+ * FlashOta erase 완료를 감시하고 0x74 지연 응답을 송신한다.
+ * CPU0 main loop에서 주기적으로 호출해야 한다.
+ */
+void UdsOta_Service(void);
 
 /**
  * @brief 현재 UDS OTA 상태 반환

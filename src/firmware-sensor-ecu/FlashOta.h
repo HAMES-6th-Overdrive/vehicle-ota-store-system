@@ -137,6 +137,9 @@ void FlashOta_Reset(void);
 
 boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize);
 
+boolean FlashOta_IsDownloadReady(void);
+boolean FlashOta_IsDownloadError(void);
+
 boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
                             uint16_t length);

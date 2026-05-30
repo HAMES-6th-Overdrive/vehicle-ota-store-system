@@ -35,6 +35,7 @@
 #include "IfxStm.h"
 #include "SotaUcb.h"
 #include "SensorOtaFlash.h"
+#include "SensorOtaEraseWorker.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -106,6 +107,58 @@ typedef struct
 volatile FlashOta_WriteDebug_t g_flashOtaWriteDebug;
 
 /* ============================================================
+   STEP4A CPU1 erase worker debug
+   ============================================================ */
+
+/*
+ * STEP4A 목적:
+ *  - UDS 0x34 응답 타이밍은 기존과 동일하게 유지한다.
+ *  - FlashOta_EraseInactiveSlot()에서 CPU0이 직접 erase하지 않고,
+ *    CPU1 erase worker에 sector erase를 요청한 뒤 완료될 때까지 기다린다.
+ *  - erase 완료 후에만 0x34 positive response가 나가도록 기존 동작을 유지한다.
+ */
+volatile uint32_t g_flashOtaCpu1EraseRequestCount = 0U;
+volatile uint32_t g_flashOtaCpu1EraseDoneCount = 0U;
+volatile uint32_t g_flashOtaCpu1EraseErrorCount = 0U;
+volatile uint32_t g_flashOtaCpu1EraseTimeoutCount = 0U;
+volatile uint32_t g_flashOtaCpu1EraseLastAddr = 0U;
+volatile uint32_t g_flashOtaCpu1EraseLastFlashType = 0U;
+volatile uint32_t g_flashOtaCpu1EraseLastWorkerState = 0U;
+
+#ifndef FLASH_OTA_CPU1_ERASE_SECTOR_TIMEOUT_MS
+#define FLASH_OTA_CPU1_ERASE_SECTOR_TIMEOUT_MS   3000U
+#endif
+
+/* ============================================================
+   STEP5A async erase state
+   ============================================================ */
+
+typedef enum
+{
+    FLASH_OTA_ASYNC_ERASE_IDLE = 0,
+    FLASH_OTA_ASYNC_ERASE_BUSY,
+    FLASH_OTA_ASYNC_ERASE_DONE,
+    FLASH_OTA_ASYNC_ERASE_ERROR
+} FlashOtaAsyncEraseState_t;
+
+static volatile FlashOtaAsyncEraseState_t g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_IDLE;
+static volatile boolean g_asyncEraseRequestInFlight = FALSE;
+
+static uint32_t g_asyncEraseStartNc = 0U;
+static uint32_t g_asyncEraseEndNc = 0U;
+static uint32_t g_asyncEraseCurrentNc = 0U;
+static uint32_t g_asyncEraseSlotEndNc = 0U;
+
+volatile uint32_t g_flashOtaAsyncEraseState = 0U;
+volatile uint32_t g_flashOtaAsyncEraseStartNc = 0U;
+volatile uint32_t g_flashOtaAsyncEraseEndNc = 0U;
+volatile uint32_t g_flashOtaAsyncEraseCurrentNc = 0U;
+volatile uint32_t g_flashOtaAsyncEraseRequestInFlight = 0U;
+volatile uint32_t g_flashOtaAsyncEraseDoneCount = 0U;
+volatile uint32_t g_flashOtaAsyncEraseErrorCount = 0U;
+
+
+ /* ============================================================
    Internal state
    ============================================================ */
 
@@ -164,6 +217,8 @@ static boolean FlashOta_WritePendingMetadataToDFlash(const FlashOtaPendingMeta_t
 static boolean FlashOta_WriteDFlash8(uint32 addr, uint32 lo, uint32 hi);
 
 static boolean FlashOta_EraseInactiveSlot(uint32_t slotStartAddrNc);
+static boolean FlashOta_EraseSectorByCpu1Worker(uint32_t addrNc, IfxFlash_FlashType flashType);
+static void FlashOta_ServiceEraseInactiveSlot(void);
 static uint32_t FlashOta_AlignUpSector(uint32_t addr);
 
 /* ============================================================
@@ -195,6 +250,18 @@ void FlashOta_Reset(void)
 
     memset(&g_flashOtaPendingMeta, 0, sizeof(g_flashOtaPendingMeta));
     g_flashOtaUsePendingMeta = FALSE;
+
+    g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_IDLE;
+    g_asyncEraseRequestInFlight = FALSE;
+    g_asyncEraseStartNc = 0U;
+    g_asyncEraseEndNc = 0U;
+    g_asyncEraseCurrentNc = 0U;
+    g_asyncEraseSlotEndNc = 0U;
+    g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+    g_flashOtaAsyncEraseStartNc = 0U;
+    g_flashOtaAsyncEraseEndNc = 0U;
+    g_flashOtaAsyncEraseCurrentNc = 0U;
+    g_flashOtaAsyncEraseRequestInFlight = 0U;
 }
 
 boolean FlashOta_SetPendingMetadata(const FlashOtaPendingMeta_t *meta)
@@ -345,10 +412,11 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
         }
 
         /*
-         * 전체 slot을 이미 erase했으므로 이번 segment write 중
-         * on-demand erase를 다시 하지 않도록 erasedUntil을 slot 끝으로 둔다.
+         * STEP5A:
+         * 전체 slot erase는 CPU1 worker가 비동기로 수행한다.
+         * erase 완료 후 FlashOta_ServiceEraseInactiveSlot()에서
+         * g_erasedUntilAddrNC를 slot 끝으로 갱신한다.
          */
-        g_erasedUntilAddrNC = FlashOta_AlignUpSector(slotStartAddrNC + FLASH_OTA_MAX_IMAGE_SIZE);
     }
     else
     {
@@ -359,11 +427,42 @@ boolean FlashOta_BeginDownload(uint32_t targetAddress, uint32_t firmwareSize)
          * 단, 정상 흐름에서는 첫 segment 때 전체 slot erase가 이미 끝났으므로
          * segment2의 해당 sector도 erase된 상태여야 한다.
          */
-        g_erasedUntilAddrNC = g_downloadTargetAddrNC & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
+        /*
+         * Sparse OTA 정상 흐름에서는 첫 segment(offset 0)에서 inactive slot 전체가
+         * 이미 erase되어 있다. segment2 이후에서 on-demand erase로 CPU0을 막지 않도록
+         * erasedUntil을 slot 끝으로 유지한다.
+         */
+        g_erasedUntilAddrNC = FlashOta_AlignUpSector(slotStartAddrNC + FLASH_OTA_MAX_IMAGE_SIZE);
     }
 
     return TRUE;
 }
+
+boolean FlashOta_IsDownloadReady(void)
+{
+    if (g_flashOtaDebug.started == FALSE)
+    {
+        return FALSE;
+    }
+
+    if (g_asyncEraseState == FLASH_OTA_ASYNC_ERASE_BUSY)
+    {
+        return FALSE;
+    }
+
+    if (g_asyncEraseState == FLASH_OTA_ASYNC_ERASE_ERROR)
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+boolean FlashOta_IsDownloadError(void)
+{
+    return (g_asyncEraseState == FLASH_OTA_ASYNC_ERASE_ERROR) ? TRUE : FALSE;
+}
+
 
 boolean FlashOta_WriteBlock(uint32_t blockIndex,
                             const uint8_t *data,
@@ -654,6 +753,8 @@ boolean FlashOta_IsJumpPending(void)
 
 void FlashOta_Service(void)
 {
+    FlashOta_ServiceEraseInactiveSlot();
+
     /*
      * 1) CRC RoutineControl 이후 pending flag write 요청 처리
      *
@@ -810,44 +911,220 @@ static boolean FlashOta_EraseInactiveSlot(uint32_t slotStartAddrNc)
 {
     uint32_t eraseStartNc;
     uint32_t eraseEndNc;
-    uint32_t addrNc;
-    IfxFlash_FlashType flashType;
 
     eraseStartNc = slotStartAddrNc & ~(FLASH_OTA_SECTOR_SIZE_BYTES - 1U);
     eraseEndNc = FlashOta_AlignUpSector(slotStartAddrNc + FLASH_OTA_MAX_IMAGE_SIZE);
 
-    printf("[FlashOta] Inactive slot erase start: 0x%08X ~ 0x%08X\r\n",
+    /*
+     * STEP5A:
+     * 여기서는 erase 완료까지 기다리지 않는다.
+     * CPU1 worker가 처리할 erase 범위만 등록하고 즉시 TRUE를 반환한다.
+     * 실제 sector 요청/완료 감시는 FlashOta_ServiceEraseInactiveSlot()에서 수행한다.
+     */
+    g_asyncEraseStartNc = eraseStartNc;
+    g_asyncEraseEndNc = eraseEndNc;
+    g_asyncEraseCurrentNc = eraseStartNc;
+    g_asyncEraseSlotEndNc = eraseEndNc;
+
+    g_asyncEraseRequestInFlight = FALSE;
+    g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_BUSY;
+
+    g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+    g_flashOtaAsyncEraseStartNc = eraseStartNc;
+    g_flashOtaAsyncEraseEndNc = eraseEndNc;
+    g_flashOtaAsyncEraseCurrentNc = eraseStartNc;
+    g_flashOtaAsyncEraseRequestInFlight = 0U;
+
+    printf("[FlashOta] STEP5A async CPU1 erase start: 0x%08X ~ 0x%08X",
            eraseStartNc,
            eraseEndNc);
 
-    for (addrNc = eraseStartNc;
-         addrNc < eraseEndNc;
-         addrNc += FLASH_OTA_SECTOR_SIZE_BYTES)
+    return TRUE;
+}
+
+
+static void FlashOta_ServiceEraseInactiveSlot(void)
+{
+    IfxFlash_FlashType flashType;
+
+    if (g_asyncEraseState != FLASH_OTA_ASYNC_ERASE_BUSY)
     {
-        flashType = getPFlashTypeFromAddress(addrNc);
+        return;
+    }
 
-        if (SensorOtaFlash_Erase(addrNc,
-                                 FLASH_OTA_SECTOR_SIZE_BYTES,
-                                 flashType) == FALSE)
+    g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+    g_flashOtaAsyncEraseCurrentNc = g_asyncEraseCurrentNc;
+    g_flashOtaAsyncEraseRequestInFlight = (g_asyncEraseRequestInFlight == TRUE) ? 1U : 0U;
+    g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
+
+    if (g_asyncEraseRequestInFlight == TRUE)
+    {
+        if (SensorOtaEraseWorker_IsDone() == TRUE)
         {
-            printf("[FlashOta] Inactive slot erase failed: addr=0x%08X\r\n",
-                   addrNc);
+            g_flashOtaCpu1EraseDoneCount++;
+            SensorOtaEraseWorker_ClearResult();
 
-            g_flashOtaWriteDebug.eraseAddressNc = addrNc;
-            g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+            if (MODULE_DMU.HF_ERRSR.U != 0U)
+            {
+                g_flashOtaCpu1EraseErrorCount++;
+                g_flashOtaAsyncEraseErrorCount++;
+                g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_ERROR;
+                g_asyncEraseRequestInFlight = FALSE;
+
+                g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
+                g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+                g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+                return;
+            }
+
+            g_asyncEraseRequestInFlight = FALSE;
+            g_flashOtaWriteDebug.eraseCount++;
+            g_flashOtaDebug.eraseCount++;
+
+            g_asyncEraseCurrentNc += FLASH_OTA_SECTOR_SIZE_BYTES;
+
+            if (g_asyncEraseCurrentNc >= g_asyncEraseEndNc)
+            {
+                g_erasedUntilAddrNC = g_asyncEraseSlotEndNc;
+                g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_DONE;
+                g_flashOtaAsyncEraseDoneCount++;
+
+                g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+                g_flashOtaAsyncEraseCurrentNc = g_asyncEraseCurrentNc;
+                g_flashOtaAsyncEraseRequestInFlight = 0U;
+
+                printf("[FlashOta] STEP5A async CPU1 erase done");
+            }
+
+            return;
+        }
+
+        if (SensorOtaEraseWorker_IsError() == TRUE)
+        {
+            g_flashOtaCpu1EraseErrorCount++;
+            g_flashOtaAsyncEraseErrorCount++;
+            SensorOtaEraseWorker_ClearResult();
+
+            g_asyncEraseRequestInFlight = FALSE;
+            g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_ERROR;
+
+            g_flashOtaWriteDebug.eraseAddressNc = g_asyncEraseCurrentNc;
             g_flashOtaWriteDebug.dmuErr = MODULE_DMU.HF_ERRSR.U;
             g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
 
+            g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+            g_flashOtaAsyncEraseRequestInFlight = 0U;
+        }
+
+        return;
+    }
+
+    if (g_asyncEraseCurrentNc >= g_asyncEraseEndNc)
+    {
+        g_erasedUntilAddrNC = g_asyncEraseSlotEndNc;
+        g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_DONE;
+        g_flashOtaAsyncEraseDoneCount++;
+
+        g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+        return;
+    }
+
+    flashType = getPFlashTypeFromAddress(g_asyncEraseCurrentNc);
+
+    g_flashOtaCpu1EraseLastAddr = g_asyncEraseCurrentNc;
+    g_flashOtaCpu1EraseLastFlashType = (uint32_t)flashType;
+    g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
+
+    g_flashOtaWriteDebug.eraseAddressNc = g_asyncEraseCurrentNc;
+    g_flashOtaWriteDebug.erasedUntilNc = g_erasedUntilAddrNC;
+    g_flashOtaWriteDebug.flashType = (uint32_t)flashType;
+
+    SensorOtaEraseWorker_ClearResult();
+
+    if (SensorOtaEraseWorker_Request(g_asyncEraseCurrentNc,
+                                      FLASH_OTA_SECTOR_SIZE_BYTES,
+                                      flashType) == FALSE)
+    {
+        g_flashOtaCpu1EraseErrorCount++;
+        g_flashOtaAsyncEraseErrorCount++;
+
+        g_asyncEraseState = FLASH_OTA_ASYNC_ERASE_ERROR;
+
+        g_flashOtaWriteDebug.failReason = FLASH_OTA_FAIL_ERASE;
+        g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+        return;
+    }
+
+    g_asyncEraseRequestInFlight = TRUE;
+    g_flashOtaCpu1EraseRequestCount++;
+
+    g_flashOtaAsyncEraseState = (uint32_t)g_asyncEraseState;
+    g_flashOtaAsyncEraseRequestInFlight = 1U;
+}
+
+static boolean FlashOta_EraseSectorByCpu1Worker(uint32_t addrNc, IfxFlash_FlashType flashType)
+{
+    uint32 elapsedMs;
+
+    g_flashOtaCpu1EraseLastAddr = addrNc;
+    g_flashOtaCpu1EraseLastFlashType = (uint32_t)flashType;
+    g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
+
+    /*
+     * 이전 sector의 DONE/ERROR 결과가 남아있으면 IDLE로 정리한다.
+     */
+    SensorOtaEraseWorker_ClearResult();
+
+    if (SensorOtaEraseWorker_Request(addrNc,
+                                      FLASH_OTA_SECTOR_SIZE_BYTES,
+                                      flashType) == FALSE)
+    {
+        g_flashOtaCpu1EraseErrorCount++;
+        g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
+        return FALSE;
+    }
+
+    g_flashOtaCpu1EraseRequestCount++;
+
+    for (elapsedMs = 0U;
+         elapsedMs < FLASH_OTA_CPU1_ERASE_SECTOR_TIMEOUT_MS;
+         elapsedMs++)
+    {
+        g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
+
+        if (SensorOtaEraseWorker_IsDone() == TRUE)
+        {
+            g_flashOtaCpu1EraseDoneCount++;
+            SensorOtaEraseWorker_ClearResult();
+
+            if (MODULE_DMU.HF_ERRSR.U != 0U)
+            {
+                g_flashOtaCpu1EraseErrorCount++;
+                return FALSE;
+            }
+
+            return TRUE;
+        }
+
+        if (SensorOtaEraseWorker_IsError() == TRUE)
+        {
+            g_flashOtaCpu1EraseErrorCount++;
+            SensorOtaEraseWorker_ClearResult();
             return FALSE;
         }
 
-        g_flashOtaWriteDebug.eraseCount++;
-        g_flashOtaDebug.eraseCount++;
+        /*
+         * CPU1 worker가 실행될 시간을 주기 위한 1ms 대기.
+         * 기존 FlashOta_BeginDownload()도 0x34 처리 중 erase 완료까지 기다리는 구조였으므로
+         * 0x34 응답 타이밍은 여전히 erase 완료 이후로 유지된다.
+         */
+        delayMs(1U);
     }
 
-    printf("[FlashOta] Inactive slot erase done\r\n");
+    g_flashOtaCpu1EraseTimeoutCount++;
+    g_flashOtaCpu1EraseLastWorkerState = (uint32_t)SensorOtaEraseWorker_GetState();
 
-    return TRUE;
+    return FALSE;
 }
 
 static boolean FlashOta_WriteDFlash8(uint32 addr, uint32 lo, uint32 hi)

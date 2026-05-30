@@ -77,6 +77,21 @@ volatile uint32_t g_dbgOtaLastSegmentSize = 0U;
 volatile uint32_t g_dbgOtaLastSegmentEnd = 0U;
 volatile uint32_t g_dbgOtaSegmentCount = 0U;
 
+/*
+ * STEP5A: 0x34 RequestDownload 지연 응답 상태.
+ *
+ * Flash erase는 CPU1 worker에서 비동기로 수행하고,
+ * CPU0은 main loop를 계속 돌면서 Scheduler_run()을 유지한다.
+ * erase 완료 후 UdsOta_Service()에서 0x74 positive response를 송신한다.
+ */
+static boolean g_pendingRequestDownloadResponse = FALSE;
+static uint8_t g_pendingRequestDownloadResponsePayload[3] = {0U, 0U, 0U};
+
+volatile uint32_t g_dbgOtaPendingRequestDownloadResponse = 0U;
+volatile uint32_t g_dbgOtaDownloadReadyResponseCount = 0U;
+volatile uint32_t g_dbgOtaDownloadErrorResponseCount = 0U;
+
+
 /* ============================================================
    Private prototypes
    ============================================================ */
@@ -104,6 +119,8 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length);
  * Target hook
  */
 static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize);
+static boolean Target_IsDownloadReady(void);
+static boolean Target_IsDownloadError(void);
 static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint16_t length);
 static boolean Target_RequestTransferExit(void);
 static boolean Target_CheckCrc32(uint32_t expectedCrc32, uint32_t *calculatedCrc32);
@@ -211,6 +228,50 @@ void UdsOta_onRequest(const uint8_t *payload, uint8_t length)
         }
     }
 }
+
+void UdsOta_Service(void)
+{
+    /*
+     * STEP5A:
+     * 0x34 RequestDownload에서 시작한 inactive slot erase가 완료되었는지 확인한다.
+     * 여기서는 blocking하지 않는다. CPU0 main loop가 계속 돌 수 있어야
+     * Scheduler_run()에 의해 0x201/0x202 송신이 유지된다.
+     */
+    if (g_pendingRequestDownloadResponse == TRUE)
+    {
+        if (Target_IsDownloadReady() == TRUE)
+        {
+            g_pendingRequestDownloadResponse = FALSE;
+            g_dbgOtaPendingRequestDownloadResponse = 0U;
+
+            g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
+
+            sendPositiveResponse(UDS_SID_REQUEST_DOWNLOAD,
+                                 g_pendingRequestDownloadResponsePayload,
+                                 3U);
+
+            g_dbgOtaDownloadReadyResponseCount++;
+        }
+        else if (Target_IsDownloadError() == TRUE)
+        {
+            g_pendingRequestDownloadResponse = FALSE;
+            g_dbgOtaPendingRequestDownloadResponse = 0U;
+
+            sendNegativeResponse(UDS_SID_REQUEST_DOWNLOAD,
+                                 UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+
+            g_dbgOtaDownloadErrorResponseCount++;
+        }
+        else
+        {
+            /*
+             * 아직 erase 진행 중.
+             * 아무 응답도 보내지 않고 main loop로 돌아간다.
+             */
+        }
+    }
+}
+
 
 UdsOta_State_t UdsOta_getState(void)
 {
@@ -327,7 +388,8 @@ static boolean isDownloadActiveState(void)
 {
     boolean active = FALSE;
 
-    if ((g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_REQUESTED) ||
+    if ((g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_ERASING) ||
+        (g_udsOtaDebug.state == UDS_OTA_STATE_DOWNLOAD_REQUESTED) ||
         (g_udsOtaDebug.state == UDS_OTA_STATE_TRANSFERRING))
     {
         active = TRUE;
@@ -378,6 +440,10 @@ static void resetDownloadContextOnly(void)
 
     g_udsOtaDebug.lastNrc = 0U;
     g_udsOtaDebug.lastErrorDetail = 0xFFFFFFFFU;
+
+    g_pendingRequestDownloadResponse = FALSE;
+    memset(g_pendingRequestDownloadResponsePayload, 0, sizeof(g_pendingRequestDownloadResponsePayload));
+    g_dbgOtaPendingRequestDownloadResponse = 0U;
 
     FlashOta_Reset();
 }
@@ -550,7 +616,6 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
     g_dbgOtaPackageVirtualSize = g_otaPackageVirtualSize;
     g_dbgOtaSegmentCount = g_otaSegmentCount;
 
-    g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
     g_udsOtaDebug.memoryAddress = targetMemoryAddress;
     g_udsOtaDebug.firmwareSize = memorySize;
     g_udsOtaDebug.receivedBytes = 0U;
@@ -568,13 +633,34 @@ static void handleRequestDownload(const uint8_t *payload, uint8_t length)
      * Positive Response 0x74:
      * B1 = 0x20
      * B2~B3 = MaxNumberOfBlockLength = 32
+     *
+     * STEP5A:
+     * offset 0 segment에서는 inactive slot erase가 CPU1에서 비동기로 진행될 수 있다.
+     * 이 경우 0x34 handler 안에서 기다리지 않고, UdsOta_Service()에서
+     * erase 완료 후 0x74를 지연 송신한다.
      */
     responsePayload[0] = 0x20U;
     writeU16Le(&responsePayload[1], UDS_MAX_BLOCK_LENGTH);
 
-    sendPositiveResponse(UDS_SID_REQUEST_DOWNLOAD,
-                         responsePayload,
-                         3U);
+    if (Target_IsDownloadReady() == TRUE)
+    {
+        g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_REQUESTED;
+
+        sendPositiveResponse(UDS_SID_REQUEST_DOWNLOAD,
+                             responsePayload,
+                             3U);
+    }
+    else
+    {
+        g_udsOtaDebug.state = UDS_OTA_STATE_DOWNLOAD_ERASING;
+
+        memcpy(g_pendingRequestDownloadResponsePayload,
+               responsePayload,
+               sizeof(g_pendingRequestDownloadResponsePayload));
+
+        g_pendingRequestDownloadResponse = TRUE;
+        g_dbgOtaPendingRequestDownloadResponse = 1U;
+    }
 }
 
 static void handleTransferData(const uint8_t *payload, uint8_t length)
@@ -881,6 +967,16 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
 static boolean Target_BeginDownload(uint32_t memoryAddress, uint32_t memorySize)
 {
     return FlashOta_BeginDownload(memoryAddress, memorySize);
+}
+
+static boolean Target_IsDownloadReady(void)
+{
+    return FlashOta_IsDownloadReady();
+}
+
+static boolean Target_IsDownloadError(void)
+{
+    return FlashOta_IsDownloadError();
 }
 
 static boolean Target_WriteBlock(uint32_t blockIndex, const uint8_t *data, uint16_t length)

@@ -11,6 +11,7 @@
 #include "Scheduler.h"
 #include "HallSensor.h"
 #include "FlashOta.h"
+#include "UdsOta.h"
 #include "UART_VCOM.h"
 #include "IfxAsclin_Asc.h"
 #include <stdio.h>
@@ -23,8 +24,14 @@ IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
 /* Watch 확인용 */
 volatile uint32_t mainLoopCount = 0U;
 
+volatile uint32_t g_cpu1StartAttemptCount = 0U;
+volatile uint32_t g_cpu1StartReturnValue = 0U;
+volatile uint32_t g_cpu1StartAddrValue = 0U;
+volatile uint32_t g_cpu0AfterStartCore = 0U;
+
 boolean g_isGroupBActive = FALSE;
 extern IfxAsclin_Asc g_ascPrint;
+
 int _write(int fd, char *buf, int len)
 {
     (void)fd;
@@ -57,7 +64,14 @@ void core0_main(void)
      */
     IfxScuWdt_disableCpuWatchdog(IfxScuWdt_getCpuWatchdogPassword());
     IfxScuWdt_disableSafetyWatchdog(IfxScuWdt_getSafetyWatchdogPassword());
-
+    /*
+     * Bootloader CPU1이 App START1로 직접 넘어오는 구조를 사용한다.
+     * 따라서 App CPU0에서 CPU1을 다시 start하지 않는다.
+     */
+    g_cpu1StartAttemptCount = 0U;
+    g_cpu1StartReturnValue = 0U;
+    g_cpu1StartAddrValue = 0U;
+    g_cpu0AfterStartCore = 1U;
     /*
      * CPU sync
      */
@@ -97,6 +111,7 @@ void core0_main(void)
         Scheduler_run();
         CanIf_ProcessPendingOtaRequest();
         FlashOta_Service();
+        UdsOta_Service();
         /*
          * 나중에 background task 추가 가능:
          * - OTA state machine
