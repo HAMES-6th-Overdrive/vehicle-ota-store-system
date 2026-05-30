@@ -1257,11 +1257,14 @@ async function openFlasher() {
     const r = await fetch('/api/flasher/boards');
     const d = await r.json();
     const select = document.getElementById('flash-board');
-    select.innerHTML = (d.boards || []).map(b =>
-      `<option value="${b.id}" data-implemented="${b.implemented}" data-transport="${b.transport}">
-        ${b.name} (${b.transport === 'doip' ? `${b.ecu_ip}:${b.doip_port}` : 'CAN placeholder'})
-      </option>`
-    ).join('');
+    select.innerHTML = (d.boards || []).map(b => {
+      const route = b.transport === 'doip_sensor_can_ota'
+        ? `${b.ecu_ip}:${b.doip_port} -> CAN`
+        : (b.ecu_ip && b.doip_port ? `${b.ecu_ip}:${b.doip_port}` : (b.note || b.transport));
+      return `<option value="${b.id}" data-implemented="${b.implemented}" data-transport="${b.transport}">
+        ${b.name} (${route})
+      </option>`;
+    }).join('');
     select.onchange = updateFlasherShellState;
     updateFlasherShellState();
   } catch {
@@ -1273,9 +1276,10 @@ function updateFlasherShellState() {
   const select = document.getElementById('flash-board');
   const opt = select.options[select.selectedIndex];
   const implemented = opt?.dataset.implemented === 'true';
+  const transport = opt?.dataset.transport;
   document.getElementById('flash-log').textContent = implemented
-    ? 'DoIP flasher ready'
-    : 'CAN flasher placeholder only. No transfer is implemented yet.';
+    ? (transport === 'doip_sensor_can_ota' ? 'Sensor ECU CAN OTA via ZCU ready' : 'DoIP flasher ready')
+    : 'Flasher is not implemented for this target.';
 }
 
 function arrayBufferToBase64(buffer) {
@@ -1292,8 +1296,8 @@ async function startManualFlash() {
   const boardId = document.getElementById('flash-board').value;
   const selected = document.getElementById('flash-board').selectedOptions[0];
   if(selected?.dataset.implemented !== 'true') {
-    document.getElementById('flash-log').textContent = 'CAN flasher placeholder only. No transfer is implemented yet.';
-    toast('CAN flasher is placeholder only');
+    document.getElementById('flash-log').textContent = 'Flasher is not implemented for this target.';
+    toast('flasher is not implemented');
     return;
   }
   const file = document.getElementById('flash-file').files[0];

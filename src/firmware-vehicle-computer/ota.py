@@ -16,6 +16,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+SENSOR_GATEWAY_DOIP_VERSION = 0x02
+SENSOR_GATEWAY_PT_ROUTING_ACT_REQ = 0x0005
+SENSOR_GATEWAY_PT_ROUTING_ACT_RES = 0x0006
+SENSOR_GATEWAY_PT_DIAG_MESSAGE = 0x8001
+SENSOR_GATEWAY_PT_DIAG_ACK = 0x8002
+
+
+class SensorGatewayDoipError(RuntimeError):
+    pass
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1322,6 +1333,10 @@ class OtaManager:
                 self._flash_network_lock.acquire()
                 network_lock_acquired = True
             with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
                 sock.settimeout(request_timeout)
                 set_progress("install", "flashing", percent_start, f"DoIP gateway connected: {ecu_ip}:{doip_port}")
 
@@ -1364,18 +1379,26 @@ class OtaManager:
 
                 while offset < total:
                     chunk = firmware[offset:offset + data_block_size]
-                    stage = f"TransferData seq={seq} offset={offset}/{total}"
-                    response = self._sensor_gateway_send_uds(
-                        sock,
-                        bytes([0x36, seq]) + chunk,
-                        tester_address,
-                        zcu_address,
-                        request_timeout,
-                    )
+                    block_index = block_count
+                    stage = f"TransferData block={block_index} seq={seq} offset={offset}/{total}"
+                    try:
+                        response = self._sensor_gateway_send_uds(
+                            sock,
+                            bytes([0x36, seq]) + chunk,
+                            tester_address,
+                            zcu_address,
+                            request_timeout,
+                        )
+                    except RuntimeError as exc:
+                        raise SensorGatewayDoipError(
+                            f"TransferData failed at block={block_index}, "
+                            f"seq=0x{seq:02X}, offset={offset}, length={len(chunk)}: {exc}"
+                        ) from exc
                     self._expect_uds_positive(response, 0x36)
                     if len(response) >= 2 and response[1] != seq:
-                        raise RuntimeError(
-                            f"TransferData sequence mismatch: sent=0x{seq:02X}, got=0x{response[1]:02X}"
+                        raise SensorGatewayDoipError(
+                            f"TransferData sequence mismatch at block={block_index}, "
+                            f"offset={offset}: sent=0x{seq:02X}, got=0x{response[1]:02X}"
                         )
                     if block_delay > 0:
                         time.sleep(block_delay)
@@ -1422,6 +1445,10 @@ class OtaManager:
                         request_timeout,
                     )
                     self._expect_uds_positive(response, 0x11)
+                    if len(response) >= 2 and response[1] != 0x01:
+                        raise SensorGatewayDoipError(
+                            f"ECUReset subfunction mismatch: expected=0x01, got=0x{response[1]:02X}"
+                        )
 
             return True
         except Exception as exc:
@@ -1433,7 +1460,7 @@ class OtaManager:
 
     @staticmethod
     def _build_doip(payload_type: int, payload: bytes) -> bytes:
-        version = 0x02
+        version = SENSOR_GATEWAY_DOIP_VERSION
         header = struct.pack(">BBHI", version, (~version) & 0xFF, payload_type, len(payload))
         return header + payload
 
@@ -1444,7 +1471,7 @@ class OtaManager:
         while remaining > 0:
             chunk = sock.recv(remaining)
             if not chunk:
-                raise RuntimeError("socket closed while waiting for DoIP response")
+                raise SensorGatewayDoipError("socket closed while waiting for DoIP response")
             chunks.append(chunk)
             remaining -= len(chunk)
         return b"".join(chunks)
@@ -1453,20 +1480,22 @@ class OtaManager:
     def _recv_doip(cls, sock: socket.socket) -> tuple[int, bytes]:
         header = cls._recv_exact(sock, 8)
         version, inverse, payload_type, payload_len = struct.unpack(">BBHI", header)
-        if version != 0x02 or inverse != ((~0x02) & 0xFF):
-            raise RuntimeError(f"bad DoIP header: version=0x{version:02X}, inverse=0x{inverse:02X}")
+        if version != SENSOR_GATEWAY_DOIP_VERSION or inverse != ((~SENSOR_GATEWAY_DOIP_VERSION) & 0xFF):
+            raise SensorGatewayDoipError(f"bad DoIP header: version=0x{version:02X}, inverse=0x{inverse:02X}")
         return payload_type, cls._recv_exact(sock, payload_len)
 
     @classmethod
     def _sensor_gateway_activate_routing(cls, sock: socket.socket, tester_address: int) -> None:
         payload = struct.pack(">HB", tester_address, 0x00) + b"\x00\x00\x00\x00"
-        sock.sendall(cls._build_doip(0x0005, payload))
+        sock.sendall(cls._build_doip(SENSOR_GATEWAY_PT_ROUTING_ACT_REQ, payload))
         payload_type, response = cls._recv_doip(sock)
-        if payload_type != 0x0006:
-            raise RuntimeError(f"expected routing activation response, got 0x{payload_type:04X}")
-        if len(response) < 5 or response[4] != 0x10:
-            code = response[4] if len(response) >= 5 else None
-            raise RuntimeError(f"routing activation failed: code={code}")
+        if payload_type != SENSOR_GATEWAY_PT_ROUTING_ACT_RES:
+            raise SensorGatewayDoipError(f"expected routing activation response, got 0x{payload_type:04X}")
+        if len(response) < 5:
+            raise SensorGatewayDoipError("short routing activation response")
+        response_code = response[4]
+        if response_code != 0x10:
+            raise SensorGatewayDoipError(f"routing activation failed: code=0x{response_code:02X}")
 
     @classmethod
     def _sensor_gateway_send_uds(
@@ -1478,34 +1507,45 @@ class OtaManager:
         timeout_seconds: float,
     ) -> bytes:
         diag_payload = struct.pack(">HH", tester_address, zcu_address) + uds
-        sock.sendall(cls._build_doip(0x8001, diag_payload))
+        sock.sendall(cls._build_doip(SENSOR_GATEWAY_PT_DIAG_MESSAGE, diag_payload))
         deadline = time.monotonic() + timeout_seconds
+        got_ack = False
 
         while time.monotonic() < deadline:
             sock.settimeout(max(0.1, deadline - time.monotonic()))
             payload_type, payload = cls._recv_doip(sock)
-            if payload_type == 0x8002:
+            if payload_type == SENSOR_GATEWAY_PT_DIAG_ACK:
                 if len(payload) >= 5 and payload[4] != 0x00:
-                    raise RuntimeError(f"diagnostic ACK failed: code=0x{payload[4]:02X}")
+                    raise SensorGatewayDoipError(f"diagnostic ACK failed: code=0x{payload[4]:02X}")
+                got_ack = True
                 continue
-            if payload_type != 0x8001:
-                raise RuntimeError(f"unexpected DoIP payload type: 0x{payload_type:04X}")
-            if len(payload) < 4:
-                raise RuntimeError("short diagnostic response")
-            response = payload[4:]
-            if len(response) >= 3 and response[0] == 0x7F:
-                raise RuntimeError(f"UDS negative response: sid=0x{response[1]:02X}, nrc=0x{response[2]:02X}")
-            return response
 
-        raise RuntimeError("timeout waiting for diagnostic response")
+            if payload_type == SENSOR_GATEWAY_PT_DIAG_MESSAGE:
+                if len(payload) < 4:
+                    raise SensorGatewayDoipError("short diagnostic response")
+                response = payload[4:]
+                if not got_ack:
+                    # Some ZCU builds may send the diagnostic response before the ACK.
+                    pass
+                if len(response) >= 3 and response[0] == 0x7F:
+                    raise SensorGatewayDoipError(
+                        f"UDS negative response: sid=0x{response[1]:02X}, nrc=0x{response[2]:02X}"
+                    )
+                return response
+
+            raise SensorGatewayDoipError(f"unexpected DoIP payload type: 0x{payload_type:04X}")
+
+        raise SensorGatewayDoipError("timeout waiting for diagnostic response")
 
     @staticmethod
     def _expect_uds_positive(response: bytes, expected_sid: int) -> None:
         if not response:
-            raise RuntimeError("empty UDS response")
+            raise SensorGatewayDoipError("empty UDS response")
         expected = (expected_sid + 0x40) & 0xFF
         if response[0] != expected:
-            raise RuntimeError(f"unexpected UDS response for 0x{expected_sid:02X}: {response.hex(' ').upper()}")
+            raise SensorGatewayDoipError(
+                f"unexpected UDS response for 0x{expected_sid:02X}: got {response.hex(' ').upper()}"
+            )
 
     def clear_downloaded_feature_packages(self) -> list[str]:
         removed: list[str] = []

@@ -140,9 +140,9 @@ AEB_TRIGGER_EVENT_ID = int(
 
 MANUAL_FLASHER_PROGRESS_ID = "MANUAL_FLASHER"
 FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
-    "front-zcu": {
-        "id": "front-zcu",
-        "name": "Front ZCU",
+    "zcu": {
+        "id": "zcu",
+        "name": "ZCU",
         "transport": "doip",
         "implemented": True,
         "ecu_ip": os.getenv("FRONT_ZCU_OTA_IP", "192.168.10.2"),
@@ -152,19 +152,21 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "bank_start": int(os.getenv("FRONT_ZCU_BANK_START", "0x80300000"), 0),
         "timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60")),
     },
-    "drive-ecu": {
-        "id": "drive-ecu",
-        "name": "Drive ECU",
-        "transport": "can",
-        "implemented": False,
-        "note": "CAN flashing placeholder",
-    },
     "sensor-ecu": {
         "id": "sensor-ecu",
         "name": "Sensor ECU",
-        "transport": "can",
-        "implemented": False,
-        "note": "CAN flashing placeholder",
+        "transport": "doip_sensor_can_ota",
+        "implemented": True,
+        "note": "Sensor CAN OTA via ZCU DoIP gateway",
+        "ecu_ip": os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2"),
+        "doip_port": int(os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401")),
+        "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
+        "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
+        "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
+        "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+        "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
+        "block_delay_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0.005")),
+        "activate_after_transfer": False,
     },
 }
 
@@ -2241,7 +2243,7 @@ def api_server_worker(
             do_update: bool
 
         class ManualFlashRequest(BaseModel):
-            board_id: Literal["front-zcu", "drive-ecu", "sensor-ecu"]
+            board_id: Literal["zcu", "sensor-ecu"]
             filename: str
             content_base64: str
 
@@ -2845,7 +2847,7 @@ def api_server_worker(
                     "implemented": board["implemented"],
                     "note": board.get("note"),
                 }
-                if board["transport"] == "doip":
+                if "ecu_ip" in board:
                     payload.update(
                         {
                             "ecu_ip": board["ecu_ip"],
@@ -2860,7 +2862,7 @@ def api_server_worker(
         async def flash_binary(body: ManualFlashRequest) -> dict:
             heartbeat()
             board = FLASHER_BOARD_CONFIGS[body.board_id]
-            if board.get("transport") != "doip":
+            if not board.get("implemented"):
                 ota_manager.update_progress(
                     MANUAL_FLASHER_PROGRESS_ID,
                     action_id="manual_flash",
@@ -2874,7 +2876,7 @@ def api_server_worker(
                 )
                 raise HTTPException(
                     status_code=501,
-                    detail=f"{board['name']} CAN flashing is a placeholder only",
+                    detail=f"{board['name']} flashing is not implemented",
                 )
             filename = safe_filename(body.filename)
             if not filename.lower().endswith(".bin"):
@@ -2891,21 +2893,46 @@ def api_server_worker(
             saved_path = manual_dir / f"{int(time.time())}_{filename}"
             saved_path.write_bytes(firmware)
 
-            action = {
-                "id": "manual_flash",
-                "type": "doip_uds_flash",
-                "target": body.board_id,
-                "ecu_ip": board["ecu_ip"],
-                "doip_port": board["doip_port"],
-                "tester_address": board["tester_address"],
-                "ecu_address": board["ecu_address"],
-                "bank_start": board["bank_start"],
-                "timeout_seconds": board["timeout_seconds"],
-            }
+            transport = str(board["transport"])
+            if transport == "doip":
+                action = {
+                    "id": "manual_flash",
+                    "type": "doip_uds_flash",
+                    "target": body.board_id,
+                    "ecu_ip": board["ecu_ip"],
+                    "doip_port": board["doip_port"],
+                    "tester_address": board["tester_address"],
+                    "ecu_address": board["ecu_address"],
+                    "bank_start": board["bank_start"],
+                    "timeout_seconds": board["timeout_seconds"],
+                }
+                flash_func = ota_manager.flash_bin_via_doip
+                flash_message = f"{board['name']} flashing"
+            elif transport == "doip_sensor_can_ota":
+                action = {
+                    "id": "manual_flash",
+                    "type": "doip_sensor_can_ota",
+                    "target": body.board_id,
+                    "ecu_ip": board["ecu_ip"],
+                    "doip_port": board["doip_port"],
+                    "tester_address": board["tester_address"],
+                    "ecu_address": board["ecu_address"],
+                    "app_addr": board["app_addr"],
+                    "block_size": board["block_size"],
+                    "timeout_seconds": board["timeout_seconds"],
+                    "block_delay_seconds": board["block_delay_seconds"],
+                    "activate_after_transfer": board["activate_after_transfer"],
+                }
+                flash_func = ota_manager.flash_sensor_can_ota_via_doip
+                flash_message = f"{board['name']} CAN OTA via ZCU"
+            else:
+                raise HTTPException(status_code=501, detail=f"unsupported transport: {transport}")
+
+            action_type = str(action["type"])
             ota_manager.update_progress(
                 MANUAL_FLASHER_PROGRESS_ID,
                 action_id="manual_flash",
-                action_type="doip_uds_flash",
+                action_type=action_type,
                 target=body.board_id,
                 phase="upload",
                 status="uploaded",
@@ -2917,16 +2944,16 @@ def api_server_worker(
             )
             try:
                 success = await run_in_threadpool(
-                    ota_manager.flash_bin_via_doip,
+                    flash_func,
                     saved_path,
                     MANUAL_FLASHER_PROGRESS_ID,
                     action,
                     progress={
                         "feature_id": MANUAL_FLASHER_PROGRESS_ID,
                         "action_id": "manual_flash",
-                        "action_type": "doip_uds_flash",
+                        "action_type": action_type,
                         "target": body.board_id,
-                        "message": f"{board['name']} flashing",
+                        "message": flash_message,
                         "percent_start": 5,
                         "percent_end": 100,
                     },
@@ -2936,7 +2963,7 @@ def api_server_worker(
             ota_manager.update_progress(
                 MANUAL_FLASHER_PROGRESS_ID,
                 action_id="manual_flash",
-                action_type="doip_uds_flash",
+                action_type=action_type,
                 target=body.board_id,
                 phase="complete" if success else "error",
                 status="complete" if success else "failed",
@@ -3405,19 +3432,11 @@ def build_supervisor() -> Supervisor:
         network_lock=ZCU_NETWORK_LOCK,
     )
 
-    def set_flash_active(active: bool) -> None:
-        reason = "ZCU flashing" if active else None
-        firmware_versions.set_suspended(reason)
-        vehicle_link_ping.set_suspended(reason)
-        front_zcu_ping.set_suspended(reason)
-
     ota_manager = OtaManager(
         base_dir=BASE_DIR,
         downloaded_features_dir=DOWNLOADED_FEATURES_DIR,
         firmware_dir=FIRMWARE_DIR,
         timeout_seconds=OTA_DOWNLOAD_TIMEOUT_SECONDS,
-        flash_state_callback=set_flash_active,
-        flash_network_lock=ZCU_NETWORK_LOCK,
     )
     feature_state_store = FeatureStateStore(
         FEATURE_STATE_FILE,
