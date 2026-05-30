@@ -466,7 +466,9 @@ function itemStatus(item) {
   }
   if (!item.purchased) return "미구매";
   if (item.downloadable && !item.downloaded) return "구매됨 · 다운로드 필요";
-  if (item.downloadable && item.downloaded && !item.applied) return "다운로드됨 · 런타임 적용 대기";
+  if (item.downloadable && item.downloaded && !item.applied) {
+    return item.id === "AEB" ? "설치 준비됨 · OTA 시작 필요" : "다운로드됨 · 런타임 적용 대기";
+  }
   if (item.downloadable && item.applied) return "다운로드됨 · 적용됨";
   return "구매됨";
 }

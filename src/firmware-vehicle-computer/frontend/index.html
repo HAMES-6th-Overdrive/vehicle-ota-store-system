@@ -686,21 +686,32 @@ function updateDash(d) {
   if(luffyBtn) luffyBtn.style.display = luffyAvailable ? '' : 'none';
 
   const ota = d.pending_ota || {};
-  const otaItems = [...(ota.to_install || []), ...(ota.to_update || [])];
+  const progressMap = d.ota_progress || {};
+  const visibleOta = {
+    ...ota,
+    to_install: (ota.to_install || []).filter(item => shouldShowPendingOtaItem(item, progressMap)),
+    to_update: (ota.to_update || []).filter(item => shouldShowPendingOtaItem(item, progressMap)),
+  };
+  const otaItems = [...(visibleOta.to_install || []), ...(visibleOta.to_update || [])];
   if(otaItems.length) {
-    const key = otaItems.map(i=>`${i.feature_id}:${i.ecu_target||i.target}:${i.ota_kind||''}:${i.update_scope||''}:${i.latest_version}`).join('|');
-    pendingOtaData = ota;
+    const key = otaItems.map(i=>`${i.feature_id}:${i.ecu_target||i.target}:${i.ota_kind||''}:${i.update_scope||''}:${i.latest_version}:${i.reset_required?'reset':''}`).join('|');
+    pendingOtaData = visibleOta;
     pendingOtaKey = key;
-    const mandatory = isMandatoryAebZcuOta(ota);
+    const mandatory = isMandatoryAebZcuOta(visibleOta);
     setOtaMandatoryUi(mandatory);
     if(mandatory || key !== dismissedOtaKey) {
       const first = otaItems[0];
-      const installCount = otaItems.filter(i=>i.install_required || i.ota_kind === 'initial_install').length;
-      document.getElementById('ota-banner-title').textContent = installCount
-        ? `설치 대기 ${installCount}건이 있습니다`
-        : `업데이트 ${otaItems.length}건이 있습니다`;
+      const resetCount = otaItems.filter(i=>i.reset_required).length;
+      const installCount = otaItems.filter(i=>(i.install_required || i.ota_kind === 'initial_install') && !i.reset_required).length;
+      document.getElementById('ota-banner-title').textContent = resetCount
+        ? `OTA 완료 · P단 리셋 ${resetCount}건 필요`
+        : installCount
+          ? `설치 대기 ${installCount}건이 있습니다`
+          : `업데이트 ${otaItems.length}건이 있습니다`;
       document.getElementById('ota-banner-sub').textContent =
-        `${first.name || first.feature_id} ${first.ecu_target || 'ZCU'}: v${first.current_version || '0.0.0'} → v${first.latest_version}`;
+        resetCount
+          ? `${first.name || first.feature_id} ${first.ecu_target || 'ZCU'}: P단에서 reset trigger 전송`
+          : `${first.name || first.feature_id} ${first.ecu_target || 'ZCU'}: v${first.current_version || '0.0.0'} → v${first.latest_version}`;
       showBanner();
     }
   } else {
@@ -991,13 +1002,18 @@ function otaItems(pending=pendingOtaData) {
   return [...(pending.to_install || []), ...(pending.to_update || [])];
 }
 
+function shouldShowPendingOtaItem(item, progressMap={}) {
+  const featureId = item.feature_id || item.id;
+  const progress = progressMap[featureId] || {};
+  if(progress.active) return false;
+  const initialInstall = item.install_required || item.ota_kind === 'initial_install';
+  if(featureId === 'AEB' && initialInstall && !item.reset_required) return false;
+  return true;
+}
+
 function isMandatoryAebZcuOta(pending=pendingOtaData) {
   return otaItems(pending).some(item => {
-    const targets = Array.isArray(item.targets) ? item.targets.join(',') : (item.targets || '');
-    const initialInstall = item.install_required || item.ota_kind === 'initial_install' || (pending?.to_install || []).includes(item);
-    return (item.feature_id || item.id) === 'AEB' &&
-      Boolean(initialInstall) &&
-      String(item.ecu_target || item.target || targets).toLowerCase().includes('zcu');
+    return (item.feature_id || item.id) === 'AEB' && Boolean(item.reset_required);
   });
 }
 
@@ -1015,7 +1031,7 @@ function showBanner() { document.getElementById('ota-banner').classList.add('sho
 function dismissBanner(snooze=true) {
   if(snooze && isMandatoryAebZcuOta()) {
     showBanner();
-    toast('AEB ZCU 업데이트는 건너뛸 수 없습니다.');
+    toast('AEB OTA reset trigger는 건너뛸 수 없습니다.');
     return;
   }
   document.getElementById('ota-banner').classList.remove('show');
@@ -1028,7 +1044,14 @@ function showOtaConfirm() {
   setOtaMandatoryUi(isMandatoryAebZcuOta());
   const items = otaItems();
   const hasInitialInstall = items.some(item=>item.install_required || item.ota_kind === 'initial_install');
-  document.getElementById('ota-modal-title').textContent = hasInitialInstall ? '설치 대기 목록' : '업데이트 목록';
+  const hasReset = items.some(item=>item.reset_required);
+  document.getElementById('ota-modal-title').textContent = hasReset ? 'Reset trigger 대기' : (hasInitialInstall ? '설치 대기 목록' : '업데이트 목록');
+  const modalSub = document.querySelector('#ov-ota-confirm .msub');
+  if(modalSub) {
+    modalSub.innerHTML = hasReset
+      ? 'OTA 플래시가 완료되었습니다.<br>P단으로 바꾸면 reset trigger를 전송합니다.'
+      : '아래 항목의 업데이트가 있습니다.<br>기어를 P단으로 바꾸면 자동으로 업데이트됩니다.';
+  }
   const list = document.getElementById('ota-confirm-list');
   list.innerHTML = '';
   (pendingOtaData.to_install||[]).forEach(item=>list.innerHTML+=otaRowHtml(item,'i'));
@@ -1037,17 +1060,19 @@ function showOtaConfirm() {
 }
 
 function otaRowHtml(item, kind) {
-  const badge = kind==='i'?`<span class="obadge bi">신규</span>`:`<span class="obadge bu">업데이트</span>`;
+  const badge = item.reset_required
+    ? `<span class="obadge bi">RESET</span>`
+    : (kind==='i'?`<span class="obadge bi">신규</span>`:`<span class="obadge bu">업데이트</span>`);
   const latVerStr = fmtVerObj(item.latest_versions) || item.latest_version || '-';
-  const det = kind==='i'?`${latVerStr} 설치 예정`:`→ ${latVerStr}`;
-  return `<div class="otarow"><span class="otarow-icon">${item.icon||'📦'}</span><div class="otarow-info"><div class="otarow-name">${item.full_name||item.name}</div><div class="otarow-detail">${det}</div></div>${badge}</div>`;
+  const det = item.reset_required ? 'P단에서 reset trigger 전송' : (kind==='i'?`${latVerStr} 설치 예정`:`→ ${latVerStr}`);
+  return `<div class="otarow"><span class="otarow-icon">${item.icon||'FW'}</span><div class="otarow-info"><div class="otarow-name">${item.full_name||item.name}</div><div class="otarow-detail">${det}</div></div>${badge}</div>`;
 }
 
 async function otaDecision(yes) {
   if(!yes && isMandatoryAebZcuOta()) {
     setOtaMandatoryUi(true);
     showOv('ov-ota-confirm');
-    toast('AEB ZCU 업데이트는 건너뛸 수 없습니다.');
+    toast('AEB OTA reset trigger는 건너뛸 수 없습니다.');
     return;
   }
   closeOv('ov-ota-confirm');

@@ -893,6 +893,46 @@ class OtaManager:
             checked_at=checked_at,
         )
 
+    def _downloaded_firmware_action_context(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        def metadata(path: Path, asset_name: Any = None) -> dict[str, Any]:
+            release_tag = str(action.get("downloaded_release_tag") or "")
+            version = (
+                str(action.get("downloaded_version") or "")
+                or clean_firmware_version(release_tag)
+                or str(catalog_item.get("latest_version", "1.0.0"))
+            )
+            return {
+                "release": None,
+                "release_tag": release_tag,
+                "release_url": action.get("downloaded_release_url"),
+                "version": version,
+                "asset_name": str(asset_name or path.name),
+                "path": path,
+            }
+
+        downloaded_path = action.get("downloaded_path")
+        if downloaded_path:
+            path = Path(str(downloaded_path))
+            if not path.is_absolute():
+                path = self.base_dir / path
+            if path.exists():
+                return metadata(path, action.get("downloaded_asset_name"))
+
+        asset_name = action.get("downloaded_asset_name") or action.get("asset_name")
+        if asset_name:
+            path = self.resolve_target_path(
+                {**action, "target_dir": str(action.get("target_dir", "firmware"))},
+                str(asset_name),
+            )
+            if path.exists():
+                return metadata(path, asset_name)
+
+        return self._firmware_action_context(catalog_item, action)
+
     def flash_downloaded_firmware_payload(
         self,
         catalog_item: dict[str, Any],
@@ -906,7 +946,7 @@ class OtaManager:
         target_name = str(action.get("target", "firmware"))
         checked_at = utc_now()
         percent_start, percent_end = action_progress_span(action)
-        context = self._firmware_action_context(catalog_item, action)
+        context = self._downloaded_firmware_action_context(catalog_item, action)
         bin_path = context["path"]
         if not bin_path.exists():
             raise FileNotFoundError(f"downloaded firmware not found: {bin_path}")
