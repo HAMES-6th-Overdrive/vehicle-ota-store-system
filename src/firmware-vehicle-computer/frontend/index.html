@@ -481,6 +481,8 @@ input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
     <div class="dsec">안전</div>
     <button class="dbtn" onclick="demoAEB()">🚨 AEB 긴급 제동</button>
     <button class="dbtn" onclick="demoFvsaBuzzer()">🔔 FVSA 벨 울리기</button>
+    <button class="dbtn" onclick="demoResetTrigger('zcu','ZCU')">↻ ZCU 리셋 신호</button>
+    <button class="dbtn" onclick="demoResetTrigger('sensor-ecu','Sensor ECU')">↻ Sensor ECU 리셋 신호</button>
     <div class="dsec">설정</div>
     <button class="dbtn" onclick="openDebugTerminal()">Debug Terminal</button>
     <button class="dbtn" onclick="openFlasher()">Manual Flasher</button>
@@ -1270,6 +1272,21 @@ async function demoFvsaBuzzer() {
     toast(fvsa.buzzer_error || 'FVSA 벨 울림');
   } catch(e) {
     toast(e.message || 'FVSA 벨 울리기 실패');
+  }
+}
+
+async function demoResetTrigger(target, label) {
+  toggleDemo();
+  toast(`${label} reset trigger 전송 중...`);
+  try {
+    const r = await fetch(`/api/demo/reset-trigger/${encodeURIComponent(target)}`, {method:'POST'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail || 'reset trigger failed');
+    const trigger = d.reset_trigger?.triggers?.[0] || {};
+    toast(d.message || `${label} reset trigger 전송 완료`);
+    console.info('[demo reset trigger]', trigger);
+  } catch(e) {
+    toast(e.message || `${label} reset trigger 실패`);
   }
 }
 

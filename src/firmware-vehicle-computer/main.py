@@ -2737,8 +2737,16 @@ def api_server_worker(
                 key=lambda target: (OTA_RESET_TARGET_PRIORITY.get(target, len(OTA_RESET_TARGET_ORDER)), target),
             )
 
-        def send_ota_reset_triggers(pending: dict, apply_result: dict) -> dict:
-            targets = ota_reset_targets_from_pending(pending, apply_result)
+        def send_ota_reset_target_list(targets: list[str]) -> dict:
+            normalized_targets: list[str] = []
+            for value in targets:
+                target = normalize_ota_reset_target(value)
+                if target is None or target not in ota_reset_event_map:
+                    raise ValueError(f"unknown OTA reset target: {value}")
+                if target not in normalized_targets:
+                    normalized_targets.append(target)
+
+            targets = normalized_targets
             if not targets:
                 return {"success": True, "enabled": OTA_RESET_TRIGGER_ENABLED, "triggers": []}
 
@@ -2803,6 +2811,9 @@ def api_server_worker(
                 "enabled": OTA_RESET_TRIGGER_ENABLED,
                 "triggers": triggers,
             }
+
+        def send_ota_reset_triggers(pending: dict, apply_result: dict) -> dict:
+            return send_ota_reset_target_list(ota_reset_targets_from_pending(pending, apply_result))
 
         def vehicle_computer_connection_payload() -> dict[str, Any]:
             event_status = vehicle_status.vehicle_event_snapshot(VEHICLE_COMM_STALE_SECONDS)
@@ -3436,6 +3447,34 @@ def api_server_worker(
             return {
                 **result,
                 "message": "설정 파일 초기화 완료",
+            }
+
+        @app.post("/api/demo/reset-trigger/{target}")
+        async def demo_reset_trigger(target: str) -> dict:
+            heartbeat()
+            reset_target = normalize_ota_reset_target(target)
+            if reset_target is None or reset_target not in ota_reset_event_map:
+                raise HTTPException(status_code=400, detail=f"unknown reset target: {target}")
+            try:
+                result = await run_in_threadpool(send_ota_reset_target_list, [reset_target])
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+            if not result.get("success", True):
+                errors = [
+                    str(trigger.get("error"))
+                    for trigger in result.get("triggers", [])
+                    if trigger.get("error")
+                ]
+                raise HTTPException(status_code=502, detail="; ".join(errors) or "reset trigger failed")
+            trigger = result.get("triggers", [{}])[0]
+            return {
+                "success": True,
+                "target": reset_target,
+                "reset_trigger": result,
+                "message": (
+                    f"{trigger.get('event_name', reset_target)} "
+                    f"{trigger.get('service_id', '-')}/{trigger.get('event_id', '-')} 전송 완료"
+                ),
             }
 
         @app.post("/api/store/purchase")
