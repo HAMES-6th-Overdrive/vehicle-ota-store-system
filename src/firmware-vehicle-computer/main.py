@@ -245,7 +245,13 @@ STORE_CATALOG = [
                 "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
                 "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
                 "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
-                "block_delay_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0.005")),
+                "block_delay_seconds": float(
+                    os.getenv(
+                        "AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS",
+                        os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0"),
+                    )
+                ),
+                "progress_update_interval_blocks": 1,
                 "activate_after_transfer": False,
                 "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "1")),
             },
@@ -1355,7 +1361,14 @@ class FeatureStateStore:
             action["progress_end"] = int((index + 1) * 100 / firmware_count)
             target_name = ota_target_display_name(action.get("target", "zcu"))
             try:
-                zcu_result = self.ota_manager.flash_downloaded_firmware_payload(item, action)
+                has_downloaded_payload = bool(action.get("downloaded_path") or action.get("downloaded_asset_name"))
+                if has_downloaded_payload:
+                    try:
+                        zcu_result = self.ota_manager.flash_downloaded_firmware_payload(item, action)
+                    except FileNotFoundError:
+                        zcu_result = self.ota_manager.run_action(item, action, force=True)
+                else:
+                    zcu_result = self.ota_manager.run_action(item, action, force=True)
             except Exception as exc:
                 error = f"{type(exc).__name__}: {exc}"
                 self.ota_manager.update_progress(
@@ -3086,6 +3099,7 @@ def api_server_worker(
 
         store_ota_lock = threading.Lock()
         store_ota_active: set[str] = set()
+        store_ota_last_attempt_at: dict[str, float] = {}
 
         def run_store_feature_ota(feature_id: str, *, registered: bool = False) -> None:
             if not registered:
@@ -3109,6 +3123,7 @@ def api_server_worker(
                 if feature_id in store_ota_active:
                     return False
                 store_ota_active.add(feature_id)
+                store_ota_last_attempt_at[feature_id] = time.time()
             ota_manager.update_progress(
                 feature_id,
                 action_id="queued",
@@ -3139,7 +3154,8 @@ def api_server_worker(
             progress = ota_manager.progress_for(feature_id)
             if progress.get("active"):
                 return False
-            if progress.get("phase") == "error" or progress.get("status") in {"error", "failed"}:
+            last_attempt_at = store_ota_last_attempt_at.get(feature_id, 0.0)
+            if time.time() - last_attempt_at < 5.0:
                 return False
             try:
                 record = feature_state_store.feature_record(feature_id)

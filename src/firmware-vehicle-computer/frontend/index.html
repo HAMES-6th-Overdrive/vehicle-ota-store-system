@@ -799,9 +799,11 @@ function renderCardsWithProgress(d) {
     const isOn = active[fid]??false;
     const installed = inst.includes(fid);
     const progress = otaProgress[fid] || {};
-    const installing = Boolean(progress.active);
+    const autoInstallPending = fid === 'AEB' && !installed;
+    const installing = Boolean(progress.active) || autoInstallPending;
     const progressPercent = otaProgressPercent(progress);
-    const progressBoard = otaBoardLabel(progress.target);
+    const progressFailed = progress.status === 'failed' || progress.status === 'error' || progress.phase === 'error';
+    const progressBoard = progress.target ? otaBoardLabel(progress.target) : (progressFailed ? 'OTA 오류' : 'OTA 자동 시작 대기');
     const verStr = fmtFeatureVersion(fid, vers[fid]);
     const verTag = verStr
       ? `<span class="fver">${verStr}</span>`

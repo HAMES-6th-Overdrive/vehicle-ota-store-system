@@ -460,9 +460,27 @@ function otaProgressText(progress) {
   return `${otaBoardLabel(progress?.target)} ${percent}%`;
 }
 
+function isAebInstallPending(item) {
+  return item?.id === "AEB" && item.purchased && item.downloadable && item.downloaded && !item.applied;
+}
+
+function shouldShowInstallProgress(item) {
+  const progress = item?.ota_progress || {};
+  return Boolean(progress.active) || isAebInstallPending(item);
+}
+
+function installProgressLabel(item) {
+  const progress = item?.ota_progress || {};
+  if (progress.status === "failed" || progress.status === "error" || progress.phase === "error") {
+    return "OTA 오류";
+  }
+  if (progress.target) return otaBoardLabel(progress.target);
+  return "OTA 자동 시작 대기";
+}
+
 function itemStatus(item) {
-  if (item.ota_progress?.active) {
-    return otaProgressText(item.ota_progress);
+  if (shouldShowInstallProgress(item)) {
+    return `${installProgressLabel(item)} ${otaProgressPercent(item.ota_progress)}%`;
   }
   if (!item.purchased) return "미구매";
   if (item.downloadable && !item.downloaded) return "구매됨 · 다운로드 필요";
@@ -522,8 +540,9 @@ function render(items) {
     const card = document.createElement("article");
     card.className = `card${item.purchased ? " purchased" : ""}`;
     card.dataset.featureId = item.id;
+    const progressVisible = shouldShowInstallProgress(item);
     const progressPercent = otaProgressPercent(item.ota_progress);
-    const progressCaption = item.ota_progress?.active ? otaBoardLabel(item.ota_progress.target) : "";
+    const progressCaption = progressVisible ? installProgressLabel(item) : "";
     const progressPercentText = progressCaption ? `${progressPercent}%` : "";
     card.innerHTML = `
       <div class="badge-row">
@@ -533,10 +552,10 @@ function render(items) {
       <h2 class="name">${item.full_name || item.name}</h2>
       <p class="desc">${item.description || ""}</p>
       <div class="meta" data-role="meta">${versionText(item)} · ${itemStatus(item)}</div>
-      <div class="progress-line ${item.ota_progress?.active ? "show" : ""}">
+      <div class="progress-line ${progressVisible ? "show" : ""}">
         <div class="progress-fill" data-role="progress-fill" style="width:${progressPercent}%"></div>
       </div>
-      <div class="progress-caption ${item.ota_progress?.active ? "show" : ""}" data-role="progress-caption">
+      <div class="progress-caption ${progressVisible ? "show" : ""}" data-role="progress-caption">
         <span data-role="progress-board">${progressCaption}</span>
         <span data-role="progress-percent">${progressPercentText}</span>
       </div>
@@ -566,17 +585,20 @@ function updateCardProgress(featureId, progress) {
   const board = card.querySelector('[data-role="progress-board"]');
   const percentEl = card.querySelector('[data-role="progress-percent"]');
   const meta = card.querySelector('[data-role="meta"]');
+  const item = renderedItems.find((entry) => entry.id === featureId);
   const percent = otaProgressPercent(progress);
   const active = Boolean(progress?.active);
+  const visible = active || isAebInstallPending(item);
+  const progressItem = item ? {...item, ota_progress: progress} : {ota_progress: progress};
 
   if (fill) fill.style.width = `${percent}%`;
-  line?.classList.toggle("show", active);
-  caption?.classList.toggle("show", active);
-  if (board) board.textContent = active ? otaBoardLabel(progress.target) : "";
-  if (percentEl) percentEl.textContent = active ? `${percent}%` : "";
-  if (meta && active) {
-    const item = renderedItems.find((entry) => entry.id === featureId);
-    meta.textContent = `${item ? versionText(item) : ""} · ${otaProgressText(progress)}`;
+  line?.classList.toggle("show", visible);
+  caption?.classList.toggle("show", visible);
+  if (board) board.textContent = visible ? installProgressLabel(progressItem) : "";
+  if (percentEl) percentEl.textContent = visible ? `${percent}%` : "";
+  if (meta && visible) {
+    const label = installProgressLabel(progressItem);
+    meta.textContent = `${item ? versionText(item) : ""} · ${label} ${percent}%`;
   }
 }
 
