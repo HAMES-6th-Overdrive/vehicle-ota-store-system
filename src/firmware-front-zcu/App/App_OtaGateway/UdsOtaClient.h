@@ -57,11 +57,11 @@
 #endif
 
 #ifndef UDS_TRANSFER_DATA_SIZE
-#define UDS_TRANSFER_DATA_SIZE             32U
+#define UDS_TRANSFER_DATA_SIZE             62U
 #endif
 
 #ifndef UDS_MAX_BLOCK_LENGTH
-#define UDS_MAX_BLOCK_LENGTH               32U
+#define UDS_MAX_BLOCK_LENGTH               64U
 #endif
 
 /*

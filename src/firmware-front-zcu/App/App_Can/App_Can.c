@@ -195,7 +195,7 @@ typedef struct AppCanTpChannel {
 
 static AppCanHwContext g_can_hw;
 static QueueHandle_t g_internal_rx_queue = NULL;
-#define APP_CAN_TX_STUCK_LIMIT_MS   20u
+#define APP_CAN_TX_STUCK_LIMIT_MS   1u
 
 static volatile uint32_t g_tx_in_progress_ticks = 0u;
 volatile uint32_t g_tx_stuck_recover_count = 0u;
