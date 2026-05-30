@@ -238,6 +238,7 @@ static err_t AppSensorOtaGatewayDoip_Accept(void *arg,
     memset(ds->rxBuf, 0, sizeof(ds->rxBuf));
 
     tcp_arg(newPcb, ds);
+    tcp_nagle_disable(newPcb);
     tcp_recv(newPcb, AppSensorOtaGatewayDoip_Recv);
     tcp_err(newPcb, AppSensorOtaGatewayDoip_Error);
     tcp_poll(newPcb, AppSensorOtaGatewayDoip_Poll, 2);

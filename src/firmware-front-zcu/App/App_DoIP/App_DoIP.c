@@ -146,6 +146,7 @@ static err_t DoIP_Accept(void *arg, tcpPcb *newPcb, err_t err)
     memset(ds->rxBuf, 0, sizeof(ds->rxBuf));
 
     tcp_arg (newPcb, ds);
+    tcp_nagle_disable(newPcb);
     tcp_recv(newPcb, DoIP_Recv);
     tcp_err (newPcb, DoIP_Error);
     tcp_poll(newPcb, DoIP_Poll, 2);
