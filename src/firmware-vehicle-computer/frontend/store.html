@@ -467,7 +467,7 @@ function itemStatus(item) {
   if (!item.purchased) return "미구매";
   if (item.downloadable && !item.downloaded) return "구매됨 · 다운로드 필요";
   if (item.downloadable && item.downloaded && !item.applied) {
-    return item.id === "AEB" ? "설치 준비됨 · OTA 시작 필요" : "다운로드됨 · 런타임 적용 대기";
+    return item.id === "AEB" ? "다운로드 완료 · OTA 자동 진행" : "다운로드됨 · 런타임 적용 대기";
   }
   if (item.downloadable && item.applied) return "다운로드됨 · 적용됨";
   return "구매됨";
@@ -483,9 +483,10 @@ function itemAction(item) {
   if (item.downloadable && item.downloaded && !item.applied) {
     if (item.id === "AEB") {
       return {
-        label: item.ota_progress?.active ? "설치중" : "OTA 시작",
+        label: item.ota_progress?.active ? "설치중" : "OTA 자동 진행",
         endpoint: "/api/store/download",
-        disabled: Boolean(item.ota_progress?.active),
+        disabled: true,
+        hidden: true,
       };
     }
     return { label: "적용 대기", endpoint: "/api/store/download", disabled: true };
@@ -539,15 +540,17 @@ function render(items) {
         <span data-role="progress-board">${progressCaption}</span>
         <span data-role="progress-percent">${progressPercentText}</span>
       </div>
-      <div class="actions">
-        <button class="buy" type="button" ${action.disabled ? "disabled" : ""}>
-          ${action.label}
-        </button>
-      </div>
+      ${action.hidden ? "" : `
+        <div class="actions">
+          <button class="buy" type="button" ${action.disabled ? "disabled" : ""}>
+            ${action.label}
+          </button>
+        </div>
+      `}
     `;
 
     const button = card.querySelector(".buy");
-    if (!action.disabled) {
+    if (button && !action.disabled) {
       button.addEventListener("click", () => openModal(item, action));
     }
     grid.appendChild(card);

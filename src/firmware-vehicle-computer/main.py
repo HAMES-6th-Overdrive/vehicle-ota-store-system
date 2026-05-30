@@ -1744,6 +1744,37 @@ class FeatureStateStore:
         item = self._catalog_item(feature_id)
         return self._is_record_installed(item, self.feature_record(feature_id))
 
+    def are_firmware_payloads_downloaded(self, feature_id: str) -> bool:
+        item = self._catalog_item(feature_id)
+        actions = self._zcu_actions(item)
+        if not actions:
+            return True
+        with self._lock:
+            data = self._load_unlocked()
+            record = data["items"][feature_id]
+            payloads = record.get("firmware_payloads", {})
+            if not isinstance(payloads, dict):
+                return False
+            for action in actions:
+                payload = payloads.get(str(action.get("id", "firmware")))
+                if not isinstance(payload, dict) or not payload.get("downloaded"):
+                    return False
+                raw_path = payload.get("path")
+                raw_asset = payload.get("asset_name") or action.get("asset_name")
+                path = None
+                if raw_path:
+                    path = Path(str(raw_path))
+                    if not path.is_absolute():
+                        path = self.ota_manager.base_dir / path
+                elif raw_asset:
+                    path = self.ota_manager.resolve_target_path(
+                        {**action, "target_dir": str(action.get("target_dir", "firmware"))},
+                        str(raw_asset),
+                    )
+                if path is None or not path.exists():
+                    return False
+            return True
+
     def set_feature_enabled(self, feature_id: str, enabled: bool) -> dict:
         self._catalog_item(feature_id)
         with self._lock:
@@ -3099,6 +3130,37 @@ def api_server_worker(
             thread.start()
             return True
 
+        def should_auto_start_store_ota(feature_id: str) -> bool:
+            if feature_id not in AUTO_STORE_OTA_FEATURE_IDS:
+                return False
+            with store_ota_lock:
+                if feature_id in store_ota_active:
+                    return False
+            progress = ota_manager.progress_for(feature_id)
+            if progress.get("active"):
+                return False
+            if progress.get("phase") == "error" or progress.get("status") in {"error", "failed"}:
+                return False
+            try:
+                record = feature_state_store.feature_record(feature_id)
+                if not record.get("purchased"):
+                    return False
+                if feature_state_store.is_feature_installed(feature_id):
+                    return False
+                return feature_state_store.are_firmware_payloads_downloaded(feature_id)
+            except Exception as exc:
+                logger.warning("store auto OTA state check failed for %s: %s", feature_id, exc)
+                return False
+
+        def ensure_auto_store_ota_started(feature_id: str) -> bool:
+            if not should_auto_start_store_ota(feature_id):
+                return False
+            return start_store_feature_ota(feature_id)
+
+        def ensure_auto_store_otas_started() -> None:
+            for feature_id in AUTO_STORE_OTA_FEATURE_IDS:
+                ensure_auto_store_ota_started(feature_id)
+
         def no_store_headers() -> dict[str, str]:
             return {
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -3159,6 +3221,7 @@ def api_server_worker(
         @app.get("/api/status")
         async def dashboard_status() -> dict:
             heartbeat()
+            ensure_auto_store_otas_started()
             return dashboard_payload()
 
         @app.get("/api/network/status")
@@ -3175,6 +3238,7 @@ def api_server_worker(
         @app.get("/api/store/items")
         async def store_items() -> dict:
             heartbeat()
+            ensure_auto_store_otas_started()
             return {"items": await run_in_threadpool(store_items_payload)}
 
         @app.get("/api/store/purchases")
@@ -3404,11 +3468,18 @@ def api_server_worker(
             heartbeat()
             auto_flash = body.feature_id == "AEB"
             try:
-                result = await run_in_threadpool(
-                    feature_state_store.download_feature,
-                    body.feature_id,
-                    run_flash=not auto_flash,
-                )
+                if auto_flash and feature_state_store.are_firmware_payloads_downloaded(body.feature_id):
+                    result = {
+                        "success": True,
+                        "download_skipped": True,
+                        "item": feature_state_store.feature_record(body.feature_id),
+                    }
+                else:
+                    result = await run_in_threadpool(
+                        feature_state_store.download_feature,
+                        body.feature_id,
+                        run_flash=not auto_flash,
+                    )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             refresh_feature_runtime(body.feature_id)
@@ -3416,7 +3487,8 @@ def api_server_worker(
                 result["item"] = feature_state_store.feature_record(body.feature_id)
             if auto_flash:
                 result["background_ota_started"] = start_store_feature_ota(body.feature_id)
-            return {**result, "message": "다운로드 완료"}
+            message = "다운로드 완료 · OTA 자동 시작" if auto_flash else "다운로드 완료"
+            return {**result, "message": message}
 
         @app.get("/api/weather")
         async def dashboard_weather() -> dict:
@@ -3536,6 +3608,7 @@ def api_server_worker(
             try:
                 while not stop_event.is_set():
                     heartbeat()
+                    ensure_auto_store_otas_started()
                     await websocket.send_json(dashboard_payload())
                     await asyncio.sleep(1.0)
             except WebSocketDisconnect:
