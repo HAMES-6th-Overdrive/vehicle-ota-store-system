@@ -763,6 +763,230 @@ class OtaManager:
             )
             raise
 
+    def _firmware_action_context(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        release = self.fetch_latest_release(catalog_item, action)
+        release_tag = str(release.get("tag_name") or "")
+        version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
+        download_file = self.release_bin_asset_name(release, action.get("asset_name"))
+        bin_path = self.resolve_target_path(
+            {**action, "target_dir": str(action.get("target_dir", "firmware"))},
+            download_file,
+        )
+        return {
+            "release": release,
+            "release_tag": release_tag,
+            "release_url": release.get("html_url"),
+            "version": version,
+            "asset_name": download_file,
+            "path": bin_path,
+        }
+
+    def download_firmware_payload(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        current_version: str | None = None,
+        force: bool = True,
+    ) -> OtaPackageResult:
+        feature_id = str(catalog_item["id"])
+        action_id = str(action.get("id", "firmware"))
+        action_type = str(action.get("type", "firmware"))
+        target_name = str(action.get("target", "firmware"))
+        checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
+
+        self.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            phase="checking",
+            status="checking",
+            percent=percent_start,
+            message=f"{target_name} firmware release checking",
+            active=True,
+        )
+        context = self._firmware_action_context(catalog_item, action)
+        bin_path = context["path"]
+        version = str(context["version"])
+
+        if not force and bin_path.exists() and clean_firmware_version(current_version) == version:
+            self.update_progress(
+                feature_id,
+                action_id=action_id,
+                action_type=action_type,
+                target=target_name,
+                phase="complete",
+                status="current",
+                percent=percent_end,
+                message=f"{target_name} firmware already downloaded",
+                active=False,
+                bytes_downloaded=bin_path.stat().st_size,
+                total_bytes=bin_path.stat().st_size,
+            )
+            return OtaPackageResult(
+                feature_id=feature_id,
+                action_id=action_id,
+                action_type=action_type,
+                target=target_name,
+                downloaded=True,
+                applied=False,
+                updated=False,
+                path=bin_path,
+                version=version,
+                release_tag=str(context["release_tag"]),
+                release_url=str(context["release_url"]) if context["release_url"] else None,
+                asset_name=str(context["asset_name"]),
+                downloaded_at=None,
+                checked_at=checked_at,
+            )
+
+        firmware_bytes, asset_name = self.download_release_bin_asset(
+            context["release"],
+            str(context["asset_name"]),
+            progress={
+                "feature_id": feature_id,
+                "action_id": action_id,
+                "action_type": action_type,
+                "target": target_name,
+                "message": f"{target_name} firmware downloading",
+                "percent_start": percent_start,
+                "percent_end": percent_end,
+            },
+        )
+        bin_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
+        temp_target.write_bytes(firmware_bytes)
+        temp_target.replace(bin_path)
+        self.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            phase="complete",
+            status="downloaded",
+            percent=percent_end,
+            message=f"{target_name} firmware download complete",
+            active=False,
+            bytes_downloaded=len(firmware_bytes),
+            total_bytes=len(firmware_bytes),
+        )
+        return OtaPackageResult(
+            feature_id=feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            downloaded=True,
+            applied=False,
+            updated=True,
+            path=bin_path,
+            version=version,
+            release_tag=str(context["release_tag"]),
+            release_url=str(context["release_url"]) if context["release_url"] else None,
+            asset_name=asset_name,
+            downloaded_at=checked_at,
+            checked_at=checked_at,
+        )
+
+    def flash_downloaded_firmware_payload(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+        *,
+        progress: dict[str, Any] | None = None,
+    ) -> OtaPackageResult:
+        feature_id = str(catalog_item["id"])
+        action_id = str(action.get("id", "firmware"))
+        action_type = str(action.get("type", "firmware"))
+        target_name = str(action.get("target", "firmware"))
+        checked_at = utc_now()
+        percent_start, percent_end = action_progress_span(action)
+        context = self._firmware_action_context(catalog_item, action)
+        bin_path = context["path"]
+        if not bin_path.exists():
+            raise FileNotFoundError(f"downloaded firmware not found: {bin_path}")
+
+        self.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            phase="install",
+            status="flashing",
+            percent=percent_start,
+            message=f"{target_name} OTA flashing",
+            active=True,
+            bytes_downloaded=0,
+            total_bytes=bin_path.stat().st_size,
+        )
+        flash_progress = {
+            "feature_id": feature_id,
+            "action_id": action_id,
+            "action_type": action_type,
+            "target": target_name,
+            "message": f"{target_name} OTA flashing",
+            "percent_start": percent_start,
+            "percent_end": percent_end,
+        }
+        if progress:
+            flash_progress.update(progress)
+            flash_progress["percent_start"] = percent_start
+            flash_progress["percent_end"] = percent_end
+
+        if action_type == DoipSensorCanOtaAction.action_type:
+            success = self.flash_sensor_can_ota_via_doip(
+                bin_path,
+                feature_id,
+                action,
+                progress=flash_progress,
+            )
+        elif action_type == DoipUdsFlashAction.action_type:
+            success = self.flash_bin_via_doip(
+                bin_path,
+                feature_id,
+                action,
+                progress=flash_progress,
+            )
+        else:
+            raise ValueError(f"unsupported firmware flash action type: {action_type}")
+
+        firmware_size = bin_path.stat().st_size
+        self.update_progress(
+            feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            phase="complete" if success else "error",
+            status="complete" if success else "failed",
+            percent=percent_end if success else None,
+            message=f"{target_name} OTA complete" if success else f"{target_name} OTA failed",
+            active=False,
+            bytes_downloaded=firmware_size,
+            total_bytes=firmware_size,
+        )
+        return OtaPackageResult(
+            feature_id=feature_id,
+            action_id=action_id,
+            action_type=action_type,
+            target=target_name,
+            downloaded=True,
+            applied=success,
+            updated=True,
+            path=bin_path,
+            version=str(context["version"]),
+            release_tag=str(context["release_tag"]),
+            release_url=str(context["release_url"]) if context["release_url"] else None,
+            asset_name=str(context["asset_name"]),
+            downloaded_at=None,
+            checked_at=checked_at,
+            error=None if success else f"{target_name} OTA failed",
+        )
+
     def update_progress(
         self,
         feature_id: str,

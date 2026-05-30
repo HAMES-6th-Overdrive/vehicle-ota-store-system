@@ -928,7 +928,7 @@ class FeatureStateStore:
             self._upsert_pending_unlocked(pending, "to_install", pending_item)
         pending["checked_at"] = utc_now()
 
-    def purchase(self, feature_id: str) -> dict:
+    def purchase(self, feature_id: str, *, run_flash: bool = True) -> dict:
         item = self._catalog_item(feature_id)
 
         with self._lock:
@@ -946,7 +946,7 @@ class FeatureStateStore:
                 )
 
             if item.get("downloadable"):
-                self._download_feature_unlocked(data, feature_id, force=True, run_flash=True)
+                self._download_feature_unlocked(data, feature_id, force=True, run_flash=run_flash)
                 self._queue_initial_install_unlocked(data, item, data["items"][feature_id])
                 self._queue_reset_trigger_unlocked(data, item, data["items"][feature_id])
 
@@ -963,14 +963,14 @@ class FeatureStateStore:
                 "purchased": data["purchased"],
             }
 
-    def download_feature(self, feature_id: str) -> dict:
+    def download_feature(self, feature_id: str, *, run_flash: bool = True) -> dict:
         self._catalog_item(feature_id)
         with self._lock:
             data = self._load_unlocked()
             if not data["items"][feature_id]["purchased"]:
                 raise ValueError(f"store item is not purchased: {feature_id}")
             item = self._catalog_item(feature_id)
-            self._download_feature_unlocked(data, feature_id, force=True, run_flash=True)
+            self._download_feature_unlocked(data, feature_id, force=True, run_flash=run_flash)
             self._queue_initial_install_unlocked(data, item, data["items"][feature_id])
             self._queue_reset_trigger_unlocked(data, item, data["items"][feature_id])
             self._save_unlocked(data)
@@ -1245,6 +1245,135 @@ class FeatureStateStore:
                 "results": results,
             }
 
+    @staticmethod
+    def _remove_feature_pending_unlocked(data: dict, feature_id: str) -> None:
+        pending = data.setdefault("pending_ota", {"to_install": [], "to_update": [], "checked_at": None})
+        for bucket in ("to_install", "to_update"):
+            pending[bucket] = [
+                item
+                for item in pending.get(bucket, [])
+                if not isinstance(item, dict) or item.get("feature_id") != feature_id
+            ]
+        pending["checked_at"] = utc_now()
+
+    def apply_feature_ota(self, feature_id: str) -> dict:
+        item = self._catalog_item(feature_id)
+        with self._lock:
+            data = self._load_unlocked()
+            record = data["items"][feature_id]
+            if not record["purchased"]:
+                raise ValueError(f"store item is not purchased: {feature_id}")
+            if not self._zcu_actions(item):
+                return {
+                    "timestamp": utc_now(),
+                    "all_success": True,
+                    "results": [],
+                }
+
+            firmware_failed = False
+            results = []
+            firmware_count = max(1, len(self._zcu_actions(item)))
+            for index, action in enumerate(self._zcu_actions(item)):
+                action = dict(action)
+                action["progress_start"] = int(index * 100 / firmware_count)
+                action["progress_end"] = int((index + 1) * 100 / firmware_count)
+                target_name = ota_target_display_name(action.get("target", "zcu"))
+                zcu = record["zcu_ota"]
+                firmware_versions = zcu.setdefault("versions", {})
+                if not isinstance(firmware_versions, dict):
+                    firmware_versions = {}
+                    zcu["versions"] = firmware_versions
+                try:
+                    zcu_result = self.ota_manager.flash_downloaded_firmware_payload(item, action)
+                except Exception as exc:
+                    zcu["required"] = True
+                    zcu["action_id"] = action.get("id", zcu.get("action_id"))
+                    zcu["action_type"] = action.get("type", zcu.get("action_type"))
+                    zcu["target"] = action.get("target", zcu.get("target"))
+                    zcu["repo"] = action.get("release_repo") or item.get("release_repo")
+                    zcu["checked_at"] = utc_now()
+                    zcu["error"] = f"{type(exc).__name__}: {exc}"
+                    firmware_failed = True
+                    results.append(
+                        {
+                            "feature_id": feature_id,
+                            "feature_name": item.get("name", feature_id),
+                            "ecu_target": target_name,
+                            "success": False,
+                            "version": firmware_target_versions(record),
+                            "error": zcu["error"],
+                        }
+                    )
+                    break
+
+                zcu["required"] = True
+                zcu["downloaded"] = zcu_result.downloaded
+                zcu["applied"] = zcu_result.applied
+                zcu["path"] = (
+                    str(zcu_result.path.relative_to(self.ota_manager.base_dir))
+                    if zcu_result.path is not None and zcu_result.path.is_relative_to(self.ota_manager.base_dir)
+                    else str(zcu_result.path) if zcu_result.path is not None else None
+                )
+                zcu["source"] = "github-release"
+                zcu["action_id"] = zcu_result.action_id
+                zcu["action_type"] = zcu_result.action_type
+                zcu["target"] = zcu_result.target
+                zcu["repo"] = action.get("release_repo") or item.get("release_repo")
+                zcu["version"] = zcu_result.version
+                zcu["release_tag"] = zcu_result.release_tag
+                zcu["release_url"] = zcu_result.release_url
+                zcu["asset_name"] = zcu_result.asset_name or zcu.get("asset_name")
+                if zcu_result.version:
+                    normalized_version = firmware_version(zcu_result.version) or zcu_result.version
+                    firmware_versions[target_name] = normalized_version
+                    zcu["versions"] = firmware_versions
+                    if not bool(item.get("package_required", True)):
+                        record["version"] = normalized_version
+                zcu["checked_at"] = zcu_result.checked_at
+                if zcu_result.applied:
+                    zcu["applied_at"] = utc_now()
+                zcu["error"] = zcu_result.error
+                results.append(
+                    {
+                        "feature_id": feature_id,
+                        "feature_name": item.get("name", feature_id),
+                        "ecu_target": target_name,
+                        "success": bool(zcu_result.applied),
+                        "version": {
+                            FEATURE_VERSION_TARGET: record.get("version"),
+                            **firmware_target_versions(record),
+                        },
+                        "error": zcu_result.error,
+                    }
+                )
+                if not zcu_result.applied:
+                    firmware_failed = True
+                    break
+
+            if firmware_failed:
+                record["zcu_ota"]["applied"] = False
+                self._queue_initial_install_unlocked(data, item, record)
+            else:
+                self._remove_feature_pending_unlocked(data, feature_id)
+                self.ota_manager.update_progress(
+                    feature_id,
+                    action_id="complete",
+                    action_type="ota_sequence",
+                    target="vehicle",
+                    phase="complete",
+                    status="complete",
+                    percent=100,
+                    message=f"{item.get('name', feature_id)} OTA complete",
+                    active=False,
+                )
+
+            self._save_unlocked(data)
+            return {
+                "timestamp": utc_now(),
+                "all_success": not firmware_failed,
+                "results": results,
+            }
+
     def _download_feature_unlocked(
         self,
         data: dict,
@@ -1259,11 +1388,11 @@ class FeatureStateStore:
 
         record = data["items"][feature_id]
         zcu_actions = self._zcu_actions(item)
-        combined_progress = bool(run_flash and force and zcu_actions)
+        firmware_action_progress = bool(force and zcu_actions)
         package_required = bool(item.get("package_required", True))
         package_progress_end = 25 if package_required else 0
         package = record["package"]
-        if run_flash and force and zcu_actions:
+        if firmware_action_progress:
             self.ota_manager.update_progress(
                 feature_id,
                 action_id="prepare",
@@ -1272,13 +1401,17 @@ class FeatureStateStore:
                 phase="prepare",
                 status="preparing",
                 percent=0,
-                message=f"{item.get('name', feature_id)} OTA 준비 중",
+                message=(
+                    f"{item.get('name', feature_id)} OTA 준비 중"
+                    if run_flash
+                    else f"{item.get('name', feature_id)} firmware download preparing"
+                ),
                 active=True,
             )
 
         if package_required:
             package_action = dict(self.ota_manager.python_package_action(item))
-            if combined_progress:
+            if firmware_action_progress:
                 package_action["progress_start"] = 0
                 package_action["progress_end"] = package_progress_end
             result = self.ota_manager.run_action(
@@ -1341,14 +1474,14 @@ class FeatureStateStore:
         firmware_count = max(1, len(zcu_actions))
         for index, action in enumerate(zcu_actions):
             action = dict(action)
-            if combined_progress:
+            if firmware_action_progress:
                 span_start = package_progress_end + int(index * (100 - package_progress_end) / firmware_count)
                 span_end = package_progress_end + int((index + 1) * (100 - package_progress_end) / firmware_count)
                 action["progress_start"] = span_start
                 action["progress_end"] = span_end
             if action.get("type") not in ("doip_uds_flash", "doip_sensor_can_ota"):
                 continue
-            if not force or not run_flash:
+            if not force:
                 continue
             zcu = record["zcu_ota"]
             target_name = ota_target_display_name(action.get("target", "zcu"))
@@ -1357,12 +1490,25 @@ class FeatureStateStore:
                 firmware_versions = {}
                 zcu["versions"] = firmware_versions
             try:
-                zcu_result = self.ota_manager.run_action(
-                    item,
-                    action,
-                    current_version=firmware_versions.get(target_name) or zcu.get("version") or record.get("version"),
-                    force=force,
+                current_firmware_version = (
+                    firmware_versions.get(target_name)
+                    or zcu.get("version")
+                    or record.get("version")
                 )
+                if run_flash:
+                    zcu_result = self.ota_manager.run_action(
+                        item,
+                        action,
+                        current_version=current_firmware_version,
+                        force=force,
+                    )
+                else:
+                    zcu_result = self.ota_manager.download_firmware_payload(
+                        item,
+                        action,
+                        current_version=current_firmware_version,
+                        force=force,
+                    )
             except Exception as exc:
                 zcu["required"] = True
                 zcu["action_id"] = action.get("id", zcu.get("action_id"))
@@ -1404,7 +1550,7 @@ class FeatureStateStore:
                 zcu["applied_at"] = utc_now() if zcu_result.applied else None
             zcu["error"] = zcu_result.error
             updated = updated or zcu_result.updated
-            if not zcu_result.applied:
+            if run_flash and not zcu_result.applied:
                 firmware_failed = True
                 break
 
@@ -1420,6 +1566,18 @@ class FeatureStateStore:
                 status="complete",
                 percent=100,
                 message=f"{item.get('name', feature_id)} OTA 완료",
+                active=False,
+            )
+        elif force and zcu_actions:
+            self.ota_manager.update_progress(
+                feature_id,
+                action_id="download_complete",
+                action_type="ota_sequence",
+                target="vehicle",
+                phase="complete",
+                status="downloaded",
+                percent=100,
+                message=f"{item.get('name', feature_id)} firmware download complete",
                 active=False,
             )
 
@@ -2211,7 +2369,7 @@ def api_server_worker(
             import asyncio
             import uvicorn
             from ethernet import parse_payload, send_ethernet_message
-            from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+            from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
             from fastapi.responses import FileResponse, Response
             from fastapi.staticfiles import StaticFiles
             from pydantic import BaseModel, Field
@@ -2738,6 +2896,25 @@ def api_server_worker(
         if FRONTEND_DIR.exists():
             app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
+        store_ota_lock = threading.Lock()
+        store_ota_active: set[str] = set()
+
+        def run_store_feature_ota(feature_id: str) -> None:
+            with store_ota_lock:
+                if feature_id in store_ota_active:
+                    return
+                store_ota_active.add(feature_id)
+            try:
+                result = feature_state_store.apply_feature_ota(feature_id)
+                logger.info("store background OTA finished for %s: %s", feature_id, result.get("all_success"))
+                if feature_id in ("AEB", "LKAS", "FVSA"):
+                    vehicle_control.refresh_feature_runtime(feature_id)
+            except Exception as exc:
+                logger.warning("store background OTA failed for %s: %s", feature_id, exc)
+            finally:
+                with store_ota_lock:
+                    store_ota_active.discard(feature_id)
+
         def no_store_headers() -> dict[str, str]:
             return {
                 "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -3010,16 +3187,24 @@ def api_server_worker(
             }
 
         @app.post("/api/store/purchase")
-        async def store_purchase(body: StorePurchaseRequest) -> dict:
+        async def store_purchase(body: StorePurchaseRequest, background_tasks: BackgroundTasks) -> dict:
             heartbeat()
+            auto_flash = body.feature_id == "AEB"
             try:
-                result = await run_in_threadpool(feature_state_store.purchase, body.feature_id)
+                result = await run_in_threadpool(
+                    feature_state_store.purchase,
+                    body.feature_id,
+                    run_flash=not auto_flash,
+                )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             refresh_feature_runtime(body.feature_id)
             if body.feature_id in ("AEB", "LKAS", "FVSA"):
                 result["item"] = feature_state_store.feature_record(body.feature_id)
                 result["downloaded"] = result["item"]["package"]["downloaded"]
+            if auto_flash and result.get("downloaded"):
+                background_tasks.add_task(run_store_feature_ota, body.feature_id)
+                result["background_ota_started"] = True
 
             name = next(
                 item["name"] for item in STORE_CATALOG if item["id"] == body.feature_id
@@ -3032,15 +3217,23 @@ def api_server_worker(
             return {**result, "message": message}
 
         @app.post("/api/store/download")
-        async def store_download(body: StorePurchaseRequest) -> dict:
+        async def store_download(body: StorePurchaseRequest, background_tasks: BackgroundTasks) -> dict:
             heartbeat()
+            auto_flash = body.feature_id == "AEB"
             try:
-                result = await run_in_threadpool(feature_state_store.download_feature, body.feature_id)
+                result = await run_in_threadpool(
+                    feature_state_store.download_feature,
+                    body.feature_id,
+                    run_flash=not auto_flash,
+                )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
             refresh_feature_runtime(body.feature_id)
             if body.feature_id in ("AEB", "LKAS", "FVSA"):
                 result["item"] = feature_state_store.feature_record(body.feature_id)
+            if auto_flash:
+                background_tasks.add_task(run_store_feature_ota, body.feature_id)
+                result["background_ota_started"] = True
             return {**result, "message": "다운로드 완료"}
 
         @app.get("/api/weather")

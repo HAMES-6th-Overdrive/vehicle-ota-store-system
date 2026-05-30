@@ -217,6 +217,19 @@ body::before {
   transition: width 0.18s ease;
 }
 
+.progress-caption {
+  display: none;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.progress-caption.show {
+  display: flex;
+}
+
 .actions {
   display: flex;
   justify-content: flex-end;
@@ -415,6 +428,10 @@ let selectedItem = null;
 let selectedEndpoint = "/api/store/purchase";
 let progressTimer = null;
 let lastProgressPercent = 0;
+let renderedItems = [];
+let cardProgressTimer = null;
+let cardProgressBusy = false;
+const cardProgressActive = new Set();
 
 function itemInitial(item) {
   if (item.id === "LUFFY_THEME") return "THEME";
@@ -425,10 +442,27 @@ function kindLabel(kind) {
   return kind === "theme" ? "테마" : "기능";
 }
 
+function otaBoardLabel(target) {
+  const value = String(target || "").toLowerCase();
+  if (value.includes("sensor")) return "Sensor ECU CAN OTA";
+  if (value.includes("zcu")) return "ZCU OTA";
+  if (value === "vehicle") return "Vehicle OTA";
+  return `${target || "OTA"}`;
+}
+
+function otaProgressPercent(progress) {
+  const value = Number(progress?.percent);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+}
+
+function otaProgressText(progress) {
+  const percent = otaProgressPercent(progress);
+  return `${otaBoardLabel(progress?.target)} ${percent}%`;
+}
+
 function itemStatus(item) {
   if (item.ota_progress?.active) {
-    const pct = Number.isFinite(item.ota_progress.percent) ? `${item.ota_progress.percent}%` : "";
-    return `다운로드 중 ${pct}`.trim();
+    return otaProgressText(item.ota_progress);
   }
   if (!item.purchased) return "미구매";
   if (item.downloadable && !item.downloaded) return "구매됨 · 다운로드 필요";
@@ -471,11 +505,16 @@ function versionText(item) {
 function render(items) {
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
+  renderedItems = items || [];
 
   items.forEach((item) => {
     const action = itemAction(item);
     const card = document.createElement("article");
     card.className = `card${item.purchased ? " purchased" : ""}`;
+    card.dataset.featureId = item.id;
+    const progressPercent = otaProgressPercent(item.ota_progress);
+    const progressCaption = item.ota_progress?.active ? otaBoardLabel(item.ota_progress.target) : "";
+    const progressPercentText = progressCaption ? `${progressPercent}%` : "";
     card.innerHTML = `
       <div class="badge-row">
         <div class="mark">${itemInitial(item)}</div>
@@ -483,9 +522,13 @@ function render(items) {
       </div>
       <h2 class="name">${item.full_name || item.name}</h2>
       <p class="desc">${item.description || ""}</p>
-      <div class="meta">${versionText(item)} · ${itemStatus(item)}</div>
+      <div class="meta" data-role="meta">${versionText(item)} · ${itemStatus(item)}</div>
       <div class="progress-line ${item.ota_progress?.active ? "show" : ""}">
-        <div class="progress-fill" style="width:${Number.isFinite(item.ota_progress?.percent) ? item.ota_progress.percent : 0}%"></div>
+        <div class="progress-fill" data-role="progress-fill" style="width:${progressPercent}%"></div>
+      </div>
+      <div class="progress-caption ${item.ota_progress?.active ? "show" : ""}" data-role="progress-caption">
+        <span data-role="progress-board">${progressCaption}</span>
+        <span data-role="progress-percent">${progressPercentText}</span>
       </div>
       <div class="actions">
         <button class="buy" type="button" ${action.disabled ? "disabled" : ""}>
@@ -500,6 +543,61 @@ function render(items) {
     }
     grid.appendChild(card);
   });
+}
+
+function updateCardProgress(featureId, progress) {
+  const card = document.querySelector(`[data-feature-id="${featureId}"]`);
+  if (!card) return;
+  const line = card.querySelector(".progress-line");
+  const fill = card.querySelector('[data-role="progress-fill"]');
+  const caption = card.querySelector('[data-role="progress-caption"]');
+  const board = card.querySelector('[data-role="progress-board"]');
+  const percentEl = card.querySelector('[data-role="progress-percent"]');
+  const meta = card.querySelector('[data-role="meta"]');
+  const percent = otaProgressPercent(progress);
+  const active = Boolean(progress?.active);
+
+  if (fill) fill.style.width = `${percent}%`;
+  line?.classList.toggle("show", active);
+  caption?.classList.toggle("show", active);
+  if (board) board.textContent = active ? otaBoardLabel(progress.target) : "";
+  if (percentEl) percentEl.textContent = active ? `${percent}%` : "";
+  if (meta && active) {
+    const item = renderedItems.find((entry) => entry.id === featureId);
+    meta.textContent = `${item ? versionText(item) : ""} · ${otaProgressText(progress)}`;
+  }
+}
+
+async function pollCardProgress() {
+  if (cardProgressBusy) return;
+  const ids = [...new Set(renderedItems.filter((item) => item.downloadable).map((item) => item.id))];
+  if (!ids.length) return;
+  cardProgressBusy = true;
+  try {
+    await Promise.all(ids.map(async (featureId) => {
+      try {
+        const response = await fetch(`/api/ota/progress/${featureId}`, { cache: "no-store" });
+        if (!response.ok) return;
+        const progress = await response.json();
+        updateCardProgress(featureId, progress);
+        if (progress.active) {
+          cardProgressActive.add(featureId);
+        } else if (cardProgressActive.delete(featureId)) {
+          await loadStore();
+        }
+      } catch {
+        // Store cards keep their last known progress if a poll is missed.
+      }
+    }));
+  } finally {
+    cardProgressBusy = false;
+  }
+}
+
+function startCardProgressPolling() {
+  if (cardProgressTimer) return;
+  pollCardProgress();
+  cardProgressTimer = setInterval(pollCardProgress, 250);
 }
 
 function renderError(message) {
@@ -579,7 +677,7 @@ async function confirmPurchase() {
   button.disabled = true;
   if (selectedItem.downloadable) {
     lastProgressPercent = 0;
-    showProgress({ percent: 0, message: "OTA 준비 중", active: true });
+    showProgress({ percent: 0, message: "바이너리 다운로드 준비 중", active: true });
     startProgressPolling(selectedItem.id);
   }
 
@@ -595,8 +693,8 @@ async function confirmPurchase() {
     toast(data.message || "구매 완료");
     if (selectedItem.downloadable) {
       stopProgressPolling();
-      showProgress({ percent: 100, message: data.message || "OTA 완료", active: false });
-      await new Promise((resolve) => setTimeout(resolve, 900));
+      showProgress({ percent: 100, message: data.message || "바이너리 다운로드 완료", active: false });
+      await new Promise((resolve) => setTimeout(resolve, 350));
     }
     closeModal();
     await loadStore();
@@ -666,6 +764,7 @@ document.getElementById("overlay").addEventListener("click", (event) => {
 });
 
 loadStore();
+startCardProgressPolling();
 </script>
 </body>
 </html>
