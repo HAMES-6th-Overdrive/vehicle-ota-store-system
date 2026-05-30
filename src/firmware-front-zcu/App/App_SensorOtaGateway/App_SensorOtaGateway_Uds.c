@@ -55,9 +55,22 @@
 #define APP_SENSOR_OTA_GATEWAY_WAIT_NEXT_TIMEOUT_MS       5000U 
 #define APP_SENSOR_OTA_GATEWAY_WAIT_DONE_TIMEOUT_MS       60000U
 
+#define APP_SENSOR_OTA_GATEWAY_UDS_WORKER_STACK_SIZE      (configMINIMAL_STACK_SIZE + 128U)
+#define APP_SENSOR_OTA_GATEWAY_UDS_WORKER_PRIORITY        (tskIDLE_PRIORITY + 1U)
+#define APP_SENSOR_OTA_GATEWAY_UDS_WORKER_PERIOD_MS       1U
+
 /* ============================================================
    Internal state
    ============================================================ */
+
+typedef enum
+{
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE = 0,
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PENDING,
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PROCESSING,
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_DONE,
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_ERROR
+} AppSensorOtaGatewayUds_AsyncState_t;
 
 static uint8  g_session = APP_SENSOR_OTA_GATEWAY_UDS_SESSION_DEFAULT;
 
@@ -67,6 +80,14 @@ static uint8  g_blockSeq = 0x01U;
 
 /* 마지막 0x37에서 받은 CRC 확인용 */
 static uint32 g_expectedCrc32 = 0U;
+
+static volatile AppSensorOtaGatewayUds_AsyncState_t g_asyncState =
+    APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE;
+static boolean g_asyncWorkerCreated = FALSE;
+static uint16 g_asyncRxLen = 0U;
+static uint16 g_asyncTxLen = 0U;
+static uint8 g_asyncRx[APP_SENSOR_OTA_GATEWAY_UDS_RX_BUF_SIZE];
+static uint8 g_asyncTx[APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE];
 
 /* ============================================================
    Debug variables
@@ -101,6 +122,11 @@ volatile uint32 g_sensorOtaUdsFinalCrcFailCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitBlockTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitNextTimeoutCount = 0U;
 volatile uint32 g_sensorOtaUdsWaitDoneTimeoutCount = 0U;
+volatile uint32 g_sensorOtaUdsAsyncStartOkCount = 0U;
+volatile uint32 g_sensorOtaUdsAsyncStartFailCount = 0U;
+volatile uint32 g_sensorOtaUdsAsyncDoneCount = 0U;
+volatile uint32 g_sensorOtaUdsAsyncBusyCount = 0U;
+volatile uint32 g_sensorOtaUdsAsyncErrorCount = 0U;
 //debug
 volatile uint32 g_dbgWaitNextFailBlockIndex = 0U;
 volatile uint32 g_dbgWaitNextFailReqIndex = 0U;
@@ -128,6 +154,7 @@ static boolean waitUntilDoneOrError(uint32 timeoutMs);
 
 static void resetDownloadState(void);
 static uint8 nextBlockSeq(uint8 currentSeq);
+static void AppSensorOtaGatewayUds_WorkerTask(void *arg);
 
 
 /* ============================================================
@@ -168,6 +195,41 @@ void AppSensorOtaGatewayUds_Init(void)
     g_sensorOtaUdsWaitBlockTimeoutCount = 0U;
     g_sensorOtaUdsWaitNextTimeoutCount = 0U;
     g_sensorOtaUdsWaitDoneTimeoutCount = 0U;
+
+    g_sensorOtaUdsAsyncStartOkCount = 0U;
+    g_sensorOtaUdsAsyncStartFailCount = 0U;
+    g_sensorOtaUdsAsyncDoneCount = 0U;
+    g_sensorOtaUdsAsyncBusyCount = 0U;
+    g_sensorOtaUdsAsyncErrorCount = 0U;
+
+    taskENTER_CRITICAL();
+    g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE;
+    g_asyncRxLen = 0U;
+    g_asyncTxLen = 0U;
+    memset(g_asyncRx, 0, sizeof(g_asyncRx));
+    memset(g_asyncTx, 0, sizeof(g_asyncTx));
+    taskEXIT_CRITICAL();
+
+    if(g_asyncWorkerCreated == FALSE)
+    {
+        BaseType_t taskResult;
+
+        taskResult = xTaskCreate(AppSensorOtaGatewayUds_WorkerTask,
+                                 "SENSOR OTA UDS",
+                                 APP_SENSOR_OTA_GATEWAY_UDS_WORKER_STACK_SIZE,
+                                 NULL,
+                                 APP_SENSOR_OTA_GATEWAY_UDS_WORKER_PRIORITY,
+                                 NULL);
+
+        if(taskResult == pdPASS)
+        {
+            g_asyncWorkerCreated = TRUE;
+        }
+        else
+        {
+            g_sensorOtaUdsAsyncErrorCount++;
+        }
+    }
 }
 
 
@@ -178,7 +240,102 @@ void AppSensorOtaGatewayUds_Task(void)
      *
      * 나중에 DoIP level timeout, session timeout, transfer timeout 등을 넣을 경우
      * 이 함수에서 처리한다.
-     */
+    */
+}
+
+boolean AppSensorOtaGatewayUds_TryStartRequest(const uint8 *rxData,
+                                               uint16 rxLen)
+{
+    boolean result = FALSE;
+
+    if((g_asyncWorkerCreated == FALSE) ||
+       (rxData == NULL_PTR) ||
+       (rxLen == 0U) ||
+       (rxLen > APP_SENSOR_OTA_GATEWAY_UDS_RX_BUF_SIZE))
+    {
+        g_sensorOtaUdsAsyncStartFailCount++;
+        return FALSE;
+    }
+
+    taskENTER_CRITICAL();
+
+    if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE)
+    {
+        memcpy(g_asyncRx, rxData, rxLen);
+        memset(g_asyncTx, 0, sizeof(g_asyncTx));
+        g_asyncRxLen = rxLen;
+        g_asyncTxLen = 0U;
+        g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PENDING;
+        result = TRUE;
+    }
+
+    taskEXIT_CRITICAL();
+
+    if(result == TRUE)
+    {
+        g_sensorOtaUdsAsyncStartOkCount++;
+    }
+    else
+    {
+        g_sensorOtaUdsAsyncBusyCount++;
+        g_sensorOtaUdsAsyncStartFailCount++;
+    }
+
+    return result;
+}
+
+
+AppSensorOtaGatewayUds_ResponseStatus_t AppSensorOtaGatewayUds_TryReadResponse(uint8 *txData,
+                                                                               uint16 *txLen)
+{
+    AppSensorOtaGatewayUds_ResponseStatus_t status =
+        APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_NOT_READY;
+
+    if((txData == NULL_PTR) || (txLen == NULL_PTR))
+    {
+        g_sensorOtaUdsAsyncErrorCount++;
+        return APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_ERROR;
+    }
+
+    taskENTER_CRITICAL();
+
+    if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_DONE)
+    {
+        *txLen = g_asyncTxLen;
+        if(g_asyncTxLen > 0U)
+        {
+            memcpy(txData, g_asyncTx, g_asyncTxLen);
+        }
+
+        status = APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_READY;
+    }
+    else if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_ERROR)
+    {
+        *txLen = 0U;
+        status = APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_ERROR;
+    }
+
+    taskEXIT_CRITICAL();
+
+    return status;
+}
+
+
+void AppSensorOtaGatewayUds_ReleaseResponse(void)
+{
+    taskENTER_CRITICAL();
+
+    if((g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_DONE) ||
+       (g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_ERROR))
+    {
+        g_asyncRxLen = 0U;
+        g_asyncTxLen = 0U;
+        memset(g_asyncRx, 0, sizeof(g_asyncRx));
+        memset(g_asyncTx, 0, sizeof(g_asyncTx));
+        g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_IDLE;
+    }
+
+    taskEXIT_CRITICAL();
 }
 
 
@@ -812,4 +969,54 @@ static uint8 nextBlockSeq(uint8 currentSeq)
     }
 
     return (uint8)(currentSeq + 1U);
+}
+
+
+static void AppSensorOtaGatewayUds_WorkerTask(void *arg)
+{
+    uint16 localTxLen;
+
+    (void)arg;
+
+    for(;;)
+    {
+        if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PENDING)
+        {
+            taskENTER_CRITICAL();
+            if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PENDING)
+            {
+                g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PROCESSING;
+            }
+            taskEXIT_CRITICAL();
+
+            if(g_asyncState == APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_PROCESSING)
+            {
+                localTxLen = 0U;
+
+                AppSensorOtaGatewayUds_HandleService(g_asyncRx,
+                                                     g_asyncRxLen,
+                                                     g_asyncTx,
+                                                     &localTxLen);
+
+                taskENTER_CRITICAL();
+
+                if(localTxLen <= APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE)
+                {
+                    g_asyncTxLen = localTxLen;
+                    g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_DONE;
+                    g_sensorOtaUdsAsyncDoneCount++;
+                }
+                else
+                {
+                    g_asyncTxLen = 0U;
+                    g_asyncState = APP_SENSOR_OTA_GATEWAY_UDS_ASYNC_ERROR;
+                    g_sensorOtaUdsAsyncErrorCount++;
+                }
+
+                taskEXIT_CRITICAL();
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(APP_SENSOR_OTA_GATEWAY_UDS_WORKER_PERIOD_MS));
+    }
 }

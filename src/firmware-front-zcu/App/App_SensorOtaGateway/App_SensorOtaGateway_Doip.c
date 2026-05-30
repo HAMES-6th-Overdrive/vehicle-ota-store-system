@@ -40,6 +40,28 @@
 
 static tcpPcb2 *g_sensorOtaDoipPcb = NULL;
 
+typedef struct
+{
+    boolean active;
+    tcpPcb2 *pcb;
+    AppSensorOtaGatewayDoip_Session_t *session;
+    uint16 testerAddr;
+    uint8 requestSid;
+} AppSensorOtaGatewayDoip_PendingUdsResponse_t;
+
+typedef struct
+{
+    boolean active;
+    tcpPcb2 *pcb;
+    AppSensorOtaGatewayDoip_Session_t *session;
+    uint16 testerAddr;
+    uint8 requestSid;
+    uint8 nrc;
+} AppSensorOtaGatewayDoip_DeferredNegativeResponse_t;
+
+static AppSensorOtaGatewayDoip_PendingUdsResponse_t g_sensorOtaDoipPendingUdsResponse;
+static AppSensorOtaGatewayDoip_DeferredNegativeResponse_t g_sensorOtaDoipDeferredNegativeResponse;
+
 /* ============================================================
    Debug variables
    ============================================================ */
@@ -101,7 +123,27 @@ static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
                                                       uint8 *payload,
                                                       uint32 payloadLen);
 
-static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
+static boolean AppSensorOtaGatewayDoip_SendDiagResponse(tcpPcb2 *tpcb,
+                                                        uint16 testerAddr,
+                                                        const uint8 *udsRes,
+                                                        uint16 udsResLen);
+
+static uint16 AppSensorOtaGatewayDoip_BuildNegativeResponse(uint8 *udsRes,
+                                                            uint8 requestSid,
+                                                            uint8 nrc);
+
+static void AppSensorOtaGatewayDoip_SetDeferredNegativeResponse(tcpPcb2 *tpcb,
+                                                                AppSensorOtaGatewayDoip_Session_t *ds,
+                                                                uint16 testerAddr,
+                                                                uint8 requestSid,
+                                                                uint8 nrc);
+
+static void AppSensorOtaGatewayDoip_PollDeferredNegativeResponse(void);
+static void AppSensorOtaGatewayDoip_PollUdsResponse(void);
+static void AppSensorOtaGatewayDoip_ForgetPendingSession(tcpPcb2 *tpcb,
+                                                         AppSensorOtaGatewayDoip_Session_t *ds);
+
+static err_t AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
                                             uint8 *buf,
                                             uint16 len);
 
@@ -118,6 +160,12 @@ void AppSensorOtaGatewayDoip_Init(void)
     err_t err;
 
     g_sensorOtaDoipInitCount++;
+    memset((void *)&g_sensorOtaDoipPendingUdsResponse,
+           0,
+           sizeof(g_sensorOtaDoipPendingUdsResponse));
+    memset((void *)&g_sensorOtaDoipDeferredNegativeResponse,
+           0,
+           sizeof(g_sensorOtaDoipDeferredNegativeResponse));
 
     /*
      * UDS adapter도 함께 초기화한다.
@@ -148,6 +196,19 @@ void AppSensorOtaGatewayDoip_Init(void)
     {
         g_sensorOtaDoipBindFailCount++;
     }
+}
+
+
+void AppSensorOtaGatewayDoip_MainFunction(void)
+{
+    AppSensorOtaGatewayDoip_PollUdsResponse();
+
+    if(g_sensorOtaDoipPendingUdsResponse.active == TRUE)
+    {
+        return;
+    }
+
+    AppSensorOtaGatewayDoip_PollDeferredNegativeResponse();
 }
 
 /* ============================================================
@@ -256,6 +317,7 @@ static void AppSensorOtaGatewayDoip_Error(void *arg,
 
     if(ds != NULL)
     {
+        AppSensorOtaGatewayDoip_ForgetPendingSession(ds->pcb, ds);
         mem_free(ds);
     }
 
@@ -288,6 +350,8 @@ static err_t AppSensorOtaGatewayDoip_Poll(void *arg,
 static void AppSensorOtaGatewayDoip_Close(tcpPcb2 *tpcb,
                                           AppSensorOtaGatewayDoip_Session_t *ds)
 {
+    AppSensorOtaGatewayDoip_ForgetPendingSession(tpcb, ds);
+
     tcp_arg(tpcb, NULL);
     tcp_recv(tpcb, NULL);
     tcp_err(tpcb, NULL);
@@ -449,11 +513,7 @@ static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
 
     uint8 *udsData;
     uint16 udsLen;
-    uint8 udsRes[256];
-    uint16 udsResLen = 0U;
-
-    uint32 diagLen;
-    uint8 res[APP_SENSOR_OTA_GATEWAY_DOIP_HEADER_LEN + 4U + 256U];
+    uint8 requestSid;
 
     if(ds->state != APP_SENSOR_OTA_GATEWAY_DOIP_STATE_ROUTING_ACTIVE)
     {
@@ -507,6 +567,7 @@ static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
 
     udsData = &payload[4];
     udsLen = (uint16)(payloadLen - 4U);
+    requestSid = (udsLen > 0U) ? udsData[0] : 0U;
 
     if(udsLen > 0U)
     {
@@ -526,40 +587,223 @@ static void AppSensorOtaGatewayDoip_HandleDiagMessage(tcpPcb2 *tpcb,
      *   UDS_HandleService()
      *
      * Sensor ECU Gateway 구조:
-     *   AppSensorOtaGatewayUds_HandleService()
      */
-    AppSensorOtaGatewayUds_HandleService(udsData,
-                                         udsLen,
-                                         udsRes,
-                                         &udsResLen);
+    g_sensorOtaDoipLastUdsResLen = 0U;
+
+    if(g_sensorOtaDoipPendingUdsResponse.active == TRUE)
+    {
+        AppSensorOtaGatewayDoip_SetDeferredNegativeResponse(
+            tpcb,
+            ds,
+            srcAddr,
+            requestSid,
+            APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
+        return;
+    }
+
+    if(AppSensorOtaGatewayUds_TryStartRequest(udsData, udsLen) == TRUE)
+    {
+        g_sensorOtaDoipPendingUdsResponse.active = TRUE;
+        g_sensorOtaDoipPendingUdsResponse.pcb = tpcb;
+        g_sensorOtaDoipPendingUdsResponse.session = ds;
+        g_sensorOtaDoipPendingUdsResponse.testerAddr = srcAddr;
+        g_sensorOtaDoipPendingUdsResponse.requestSid = requestSid;
+        return;
+    }
+
+    AppSensorOtaGatewayDoip_SetDeferredNegativeResponse(
+        tpcb,
+        ds,
+        srcAddr,
+        requestSid,
+        APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_REJECT);
+
+}
+
+
+static boolean AppSensorOtaGatewayDoip_SendDiagResponse(tcpPcb2 *tpcb,
+                                                        uint16 testerAddr,
+                                                        const uint8 *udsRes,
+                                                        uint16 udsResLen)
+{
+    uint32 diagLen;
+    uint8 res[APP_SENSOR_OTA_GATEWAY_DOIP_HEADER_LEN +
+              4U +
+              APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE];
+
+    if((tpcb == NULL) ||
+       (udsRes == NULL_PTR) ||
+       (udsResLen == 0U) ||
+       (udsResLen > APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE))
+    {
+        return FALSE;
+    }
+
+    diagLen = 4U + udsResLen;
+
+    AppSensorOtaGatewayDoip_BuildHeader(res,
+                                        APP_SENSOR_OTA_GATEWAY_DOIP_DIAG_MESSAGE,
+                                        diagLen);
+
+    res[8]  = (uint8)((APP_SENSOR_OTA_GATEWAY_DOIP_ZCU_ADDR >> 8) & 0xFFU);
+    res[9]  = (uint8)(APP_SENSOR_OTA_GATEWAY_DOIP_ZCU_ADDR & 0xFFU);
+    res[10] = (uint8)((testerAddr >> 8) & 0xFFU);
+    res[11] = (uint8)(testerAddr & 0xFFU);
+
+    memcpy(&res[12], udsRes, udsResLen);
+
+    return (AppSensorOtaGatewayDoip_SendRaw(
+                tpcb,
+                res,
+                (uint16)(APP_SENSOR_OTA_GATEWAY_DOIP_HEADER_LEN + diagLen)) == ERR_OK) ? TRUE : FALSE;
+}
+
+
+static uint16 AppSensorOtaGatewayDoip_BuildNegativeResponse(uint8 *udsRes,
+                                                            uint8 requestSid,
+                                                            uint8 nrc)
+{
+    udsRes[0] = APP_SENSOR_OTA_GATEWAY_UDS_NEGATIVE_RSP;
+    udsRes[1] = requestSid;
+    udsRes[2] = nrc;
+
+    return 3U;
+}
+
+
+static void AppSensorOtaGatewayDoip_SetDeferredNegativeResponse(tcpPcb2 *tpcb,
+                                                                AppSensorOtaGatewayDoip_Session_t *ds,
+                                                                uint16 testerAddr,
+                                                                uint8 requestSid,
+                                                                uint8 nrc)
+{
+    if(g_sensorOtaDoipDeferredNegativeResponse.active == TRUE)
+    {
+        return;
+    }
+
+    g_sensorOtaDoipDeferredNegativeResponse.active = TRUE;
+    g_sensorOtaDoipDeferredNegativeResponse.pcb = tpcb;
+    g_sensorOtaDoipDeferredNegativeResponse.session = ds;
+    g_sensorOtaDoipDeferredNegativeResponse.testerAddr = testerAddr;
+    g_sensorOtaDoipDeferredNegativeResponse.requestSid = requestSid;
+    g_sensorOtaDoipDeferredNegativeResponse.nrc = nrc;
+}
+
+
+static void AppSensorOtaGatewayDoip_PollDeferredNegativeResponse(void)
+{
+    uint8 udsRes[3];
+    uint16 udsResLen;
+
+    if(g_sensorOtaDoipDeferredNegativeResponse.active != TRUE)
+    {
+        return;
+    }
+
+    if((g_sensorOtaDoipDeferredNegativeResponse.pcb == NULL) ||
+       (g_sensorOtaDoipDeferredNegativeResponse.session == NULL) ||
+       (g_sensorOtaDoipDeferredNegativeResponse.session->state !=
+        APP_SENSOR_OTA_GATEWAY_DOIP_STATE_ROUTING_ACTIVE))
+    {
+        memset((void *)&g_sensorOtaDoipDeferredNegativeResponse,
+               0,
+               sizeof(g_sensorOtaDoipDeferredNegativeResponse));
+        return;
+    }
+
+    udsResLen = AppSensorOtaGatewayDoip_BuildNegativeResponse(
+                    udsRes,
+                    g_sensorOtaDoipDeferredNegativeResponse.requestSid,
+                    g_sensorOtaDoipDeferredNegativeResponse.nrc);
+
+    if(AppSensorOtaGatewayDoip_SendDiagResponse(
+           g_sensorOtaDoipDeferredNegativeResponse.pcb,
+           g_sensorOtaDoipDeferredNegativeResponse.testerAddr,
+           udsRes,
+           udsResLen) == TRUE)
+    {
+        memset((void *)&g_sensorOtaDoipDeferredNegativeResponse,
+               0,
+               sizeof(g_sensorOtaDoipDeferredNegativeResponse));
+    }
+}
+
+
+static void AppSensorOtaGatewayDoip_PollUdsResponse(void)
+{
+    uint8 udsRes[APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE];
+    uint16 udsResLen = 0U;
+    AppSensorOtaGatewayUds_ResponseStatus_t status;
+    boolean responseConsumed = FALSE;
+
+    if(g_sensorOtaDoipPendingUdsResponse.active != TRUE)
+    {
+        return;
+    }
+
+    status = AppSensorOtaGatewayUds_TryReadResponse(udsRes, &udsResLen);
+    if(status == APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_NOT_READY)
+    {
+        return;
+    }
+
+    if(status == APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_ERROR)
+    {
+        udsResLen = AppSensorOtaGatewayDoip_BuildNegativeResponse(
+                        udsRes,
+                        g_sensorOtaDoipPendingUdsResponse.requestSid,
+                        APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE);
+    }
 
     g_sensorOtaDoipLastUdsResLen = udsResLen;
 
-    if(udsResLen > 0U)
+    if((g_sensorOtaDoipPendingUdsResponse.pcb == NULL) ||
+       (g_sensorOtaDoipPendingUdsResponse.session == NULL) ||
+       (g_sensorOtaDoipPendingUdsResponse.session->state !=
+        APP_SENSOR_OTA_GATEWAY_DOIP_STATE_ROUTING_ACTIVE) ||
+       (udsResLen == 0U))
     {
-        diagLen = 4U + udsResLen;
+        responseConsumed = TRUE;
+    }
+    else
+    {
+        responseConsumed = AppSensorOtaGatewayDoip_SendDiagResponse(
+                               g_sensorOtaDoipPendingUdsResponse.pcb,
+                               g_sensorOtaDoipPendingUdsResponse.testerAddr,
+                               udsRes,
+                               udsResLen);
+    }
 
-        AppSensorOtaGatewayDoip_BuildHeader(res,
-                                            APP_SENSOR_OTA_GATEWAY_DOIP_DIAG_MESSAGE,
-                                            diagLen);
-
-        /*
-         * Diagnostic Message Response:
-         *   source = ZCU
-         *   target = Tester
-         */
-        res[8]  = (uint8)((APP_SENSOR_OTA_GATEWAY_DOIP_ZCU_ADDR >> 8) & 0xFFU);
-        res[9]  = (uint8)(APP_SENSOR_OTA_GATEWAY_DOIP_ZCU_ADDR & 0xFFU);
-        res[10] = (uint8)((srcAddr >> 8) & 0xFFU);
-        res[11] = (uint8)(srcAddr & 0xFFU);
-
-        memcpy(&res[12], udsRes, udsResLen);
-
-        AppSensorOtaGatewayDoip_SendRaw(tpcb,
-                                        res,
-                                        (uint16)(APP_SENSOR_OTA_GATEWAY_DOIP_HEADER_LEN + diagLen));
-
+    if(responseConsumed == TRUE)
+    {
+        AppSensorOtaGatewayUds_ReleaseResponse();
+        memset((void *)&g_sensorOtaDoipPendingUdsResponse,
+               0,
+               sizeof(g_sensorOtaDoipPendingUdsResponse));
         g_sensorOtaDoipDiagResCount++;
+    }
+}
+
+
+static void AppSensorOtaGatewayDoip_ForgetPendingSession(tcpPcb2 *tpcb,
+                                                         AppSensorOtaGatewayDoip_Session_t *ds)
+{
+    if((g_sensorOtaDoipPendingUdsResponse.active == TRUE) &&
+       ((g_sensorOtaDoipPendingUdsResponse.pcb == tpcb) ||
+        (g_sensorOtaDoipPendingUdsResponse.session == ds)))
+    {
+        g_sensorOtaDoipPendingUdsResponse.pcb = NULL;
+        g_sensorOtaDoipPendingUdsResponse.session = NULL;
+    }
+
+    if((g_sensorOtaDoipDeferredNegativeResponse.active == TRUE) &&
+       ((g_sensorOtaDoipDeferredNegativeResponse.pcb == tpcb) ||
+        (g_sensorOtaDoipDeferredNegativeResponse.session == ds)))
+    {
+        memset((void *)&g_sensorOtaDoipDeferredNegativeResponse,
+               0,
+               sizeof(g_sensorOtaDoipDeferredNegativeResponse));
     }
 }
 
@@ -581,14 +825,21 @@ static void AppSensorOtaGatewayDoip_BuildHeader(uint8 *buf,
 }
 
 
-static void AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
+static err_t AppSensorOtaGatewayDoip_SendRaw(tcpPcb2 *tpcb,
                                             uint8 *buf,
                                             uint16 len)
 {
-    (void)tcp_write(tpcb,
+    err_t err;
+
+    err = tcp_write(tpcb,
                     buf,
                     len,
                     TCP_WRITE_FLAG_COPY);
 
-    (void)tcp_output(tpcb);
+    if(err == ERR_OK)
+    {
+        (void)tcp_output(tpcb);
+    }
+
+    return err;
 }

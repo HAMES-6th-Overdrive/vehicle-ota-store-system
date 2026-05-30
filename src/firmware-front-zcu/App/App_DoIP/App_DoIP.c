@@ -49,6 +49,28 @@
 /*--------------------------------------------Private Variables/Constants--------------------------------------------*/
 static tcpPcb *g_doipPcb;
 
+typedef struct
+{
+    boolean    active;
+    tcpPcb    *pcb;
+    DoIPSession *session;
+    uint16     testerAddr;
+    uint8      requestSid;
+} DoIPPendingCore1Response;
+
+typedef struct
+{
+    boolean    active;
+    tcpPcb    *pcb;
+    DoIPSession *session;
+    uint16     testerAddr;
+    uint8      requestSid;
+    uint8      nrc;
+} DoIPDeferredNegativeResponse;
+
+static DoIPPendingCore1Response g_doipPendingCore1Response;
+static DoIPDeferredNegativeResponse g_doipDeferredNegativeResponse;
+
 /*********************************************************************************************************************/
 
 /*********************************************************************************************************************/
@@ -63,7 +85,15 @@ static void   DoIP_Process (tcpPcb *tpcb, DoIPSession *ds);
 static void   DoIP_HandleRoutingActivation (tcpPcb *tpcb, DoIPSession *ds, uint8 *payload);
 static void   DoIP_HandleDiagMessage       (tcpPcb *tpcb, DoIPSession *ds,
                                             uint8 *payload, uint32 payloadLen);
-static void   DoIP_SendRaw (tcpPcb *tpcb, uint8 *buf, uint16 len);
+static boolean DoIP_SendDiagResponse       (tcpPcb *tpcb, uint16 testerAddr,
+                                            const uint8 *udsRes, uint16 udsResLen);
+static uint16 DoIP_BuildNegativeResponse   (uint8 *udsRes, uint8 requestSid, uint8 nrc);
+static void   DoIP_SetDeferredNegativeResponse(tcpPcb *tpcb, DoIPSession *ds,
+                                               uint16 testerAddr, uint8 requestSid, uint8 nrc);
+static void   DoIP_PollDeferredNegativeResponse(void);
+static void   DoIP_PollCore1Response(void);
+static void   DoIP_ForgetPendingSession(tcpPcb *tpcb, DoIPSession *ds);
+static err_t  DoIP_SendRaw (tcpPcb *tpcb, uint8 *buf, uint16 len);
 static void   DoIP_BuildHeader (uint8 *buf, uint16 payloadType, uint32 payloadLen);
 
 /*********************************************************************************************************************/
@@ -72,6 +102,9 @@ static void   DoIP_BuildHeader (uint8 *buf, uint16 payloadType, uint32 payloadLe
 /*---------------------------------------------Function Implementations----------------------------------------------*/
 void DoIP_Init(void)
 {
+    memset((void *)&g_doipPendingCore1Response, 0, sizeof(g_doipPendingCore1Response));
+    memset((void *)&g_doipDeferredNegativeResponse, 0, sizeof(g_doipDeferredNegativeResponse));
+
     g_doipPcb = tcp_new();
     if (g_doipPcb != NULL)
     {
@@ -82,6 +115,18 @@ void DoIP_Init(void)
             tcp_accept(g_doipPcb, DoIP_Accept);
         }
     }
+}
+
+void DoIP_MainFunction(void)
+{
+    DoIP_PollCore1Response();
+
+    if (g_doipPendingCore1Response.active == TRUE)
+    {
+        return;
+    }
+
+    DoIP_PollDeferredNegativeResponse();
 }
 
 /* Echo.c echoAccept() 와 동일한 구조 */
@@ -150,7 +195,10 @@ static void DoIP_Error(void *arg, err_t err)
     LWIP_UNUSED_ARG(err);
     DoIPSession *ds = (DoIPSession *)arg;
     if (ds != NULL)
+    {
+        DoIP_ForgetPendingSession(ds->pcb, ds);
         mem_free(ds);
+    }
 }
 
 /* Echo.c echoPoll() 와 동일한 구조 */
@@ -171,6 +219,8 @@ static err_t DoIP_Poll(void *arg, tcpPcb *tpcb)
 /* Echo.c echoClose() 와 동일한 구조 */
 static void DoIP_Close(tcpPcb *tpcb, DoIPSession *ds)
 {
+    DoIP_ForgetPendingSession(tpcb, ds);
+
     tcp_arg (tpcb, NULL);
     tcp_recv(tpcb, NULL);
     tcp_err (tpcb, NULL);
@@ -199,6 +249,9 @@ static void DoIP_Process(tcpPcb *tpcb, DoIPSession *ds)
     uint16 payloadType = ((uint16)buf[2] << 8) | buf[3];
     uint32 payloadLen  = ((uint32)buf[4] << 24) | ((uint32)buf[5] << 16)
                        | ((uint32)buf[6] <<  8) |  (uint32)buf[7];
+
+    if (payloadLen > (uint32)(len - DOIP_HEADER_LEN))
+        return;
 
     uint8 *payload = buf + DOIP_HEADER_LEN;
 
@@ -271,36 +324,171 @@ static void DoIP_HandleDiagMessage(tcpPcb *tpcb, DoIPSession *ds,
     /* ── UDS 처리는 Core1 diagnostic worker로 전달 ───────── */
     uint8  *udsData   = payload + 4;
     uint16  udsLen    = (uint16)(payloadLen - 4u);
-    uint8   udsRes[APP_DIAG_CORE1_TX_BUF_SIZE];
-    uint16  udsResLen = 0;
+    uint8   requestSid = (udsLen > 0u) ? udsData[0] : 0x00u;
 
-    if (AppDiagCore1_RequestBlocking(udsData,
-                                     udsLen,
-                                     udsRes,
-                                     &udsResLen,
-                                     APP_DIAG_CORE1_DEFAULT_TIMEOUT_MS) != TRUE)
+    if (g_doipPendingCore1Response.active == TRUE)
     {
-        /* Core1 worker timeout/busy 시 UDS generalReject 응답 */
-        udsRes[0] = 0x7Fu;
-        udsRes[1] = (udsLen > 0u) ? udsData[0] : 0x00u;
-        udsRes[2] = 0x10u;
-        udsResLen = 3u;
+        DoIP_SetDeferredNegativeResponse(tpcb, ds, srcAddr, requestSid, 0x10u);
+        return;
     }
 
-    /* ── UDS 응답을 DoIP로 감싸서 전송: ZCU → Tester ─────── */
-    if (udsResLen > 0)
+    /* ── UDS 요청은 Core1 worker에 맡기고 수신 콜백은 바로 종료 ─────── */
+    if (AppDiagCore1_TryStartRequest(udsData, udsLen) == TRUE)
     {
-        uint32 diagLen = 4 + udsResLen;
-        uint8  res[DOIP_HEADER_LEN + 4 + APP_DIAG_CORE1_TX_BUF_SIZE];
+        g_doipPendingCore1Response.active = TRUE;
+        g_doipPendingCore1Response.pcb = tpcb;
+        g_doipPendingCore1Response.session = ds;
+        g_doipPendingCore1Response.testerAddr = srcAddr;
+        g_doipPendingCore1Response.requestSid = requestSid;
+        return;
+    }
 
-        DoIP_BuildHeader(res, DOIP_DIAG_MESSAGE, diagLen);
-        res[8]  = (DOIP_ZCU_ADDR >> 8) & 0xFF;  /* source = ZCU   */
-        res[9]  =  DOIP_ZCU_ADDR       & 0xFF;
-        res[10] = (srcAddr       >> 8) & 0xFF;  /* target = Tester */
-        res[11] =  srcAddr             & 0xFF;
-        memcpy(&res[12], udsRes, udsResLen);
+    DoIP_SetDeferredNegativeResponse(tpcb, ds, srcAddr, requestSid, 0x10u);
+}
 
-        DoIP_SendRaw(tpcb, res, (uint16)(DOIP_HEADER_LEN + diagLen));
+static boolean DoIP_SendDiagResponse(tcpPcb *tpcb, uint16 testerAddr,
+                                     const uint8 *udsRes, uint16 udsResLen)
+{
+    uint32 diagLen;
+    uint8 res[DOIP_HEADER_LEN + 4u + APP_DIAG_CORE1_TX_BUF_SIZE];
+
+    if ((tpcb == NULL) || (udsRes == NULL) ||
+        (udsResLen == 0u) || (udsResLen > APP_DIAG_CORE1_TX_BUF_SIZE))
+    {
+        return FALSE;
+    }
+
+    diagLen = 4u + udsResLen;
+
+    DoIP_BuildHeader(res, DOIP_DIAG_MESSAGE, diagLen);
+    res[8]  = (DOIP_ZCU_ADDR >> 8) & 0xFF;
+    res[9]  =  DOIP_ZCU_ADDR       & 0xFF;
+    res[10] = (testerAddr    >> 8) & 0xFF;
+    res[11] =  testerAddr          & 0xFF;
+    memcpy(&res[12], udsRes, udsResLen);
+
+    return (DoIP_SendRaw(tpcb,
+                         res,
+                         (uint16)(DOIP_HEADER_LEN + diagLen)) == ERR_OK) ? TRUE : FALSE;
+}
+
+static uint16 DoIP_BuildNegativeResponse(uint8 *udsRes, uint8 requestSid, uint8 nrc)
+{
+    udsRes[0] = 0x7Fu;
+    udsRes[1] = requestSid;
+    udsRes[2] = nrc;
+    return 3u;
+}
+
+static void DoIP_SetDeferredNegativeResponse(tcpPcb *tpcb, DoIPSession *ds,
+                                             uint16 testerAddr, uint8 requestSid, uint8 nrc)
+{
+    if (g_doipDeferredNegativeResponse.active == TRUE)
+    {
+        return;
+    }
+
+    g_doipDeferredNegativeResponse.active = TRUE;
+    g_doipDeferredNegativeResponse.pcb = tpcb;
+    g_doipDeferredNegativeResponse.session = ds;
+    g_doipDeferredNegativeResponse.testerAddr = testerAddr;
+    g_doipDeferredNegativeResponse.requestSid = requestSid;
+    g_doipDeferredNegativeResponse.nrc = nrc;
+}
+
+static void DoIP_PollDeferredNegativeResponse(void)
+{
+    uint8 udsRes[3];
+    uint16 udsResLen;
+
+    if (g_doipDeferredNegativeResponse.active != TRUE)
+    {
+        return;
+    }
+
+    if ((g_doipDeferredNegativeResponse.pcb == NULL) ||
+        (g_doipDeferredNegativeResponse.session == NULL) ||
+        (g_doipDeferredNegativeResponse.session->state != DOIP_STATE_ROUTING_ACTIVE))
+    {
+        memset((void *)&g_doipDeferredNegativeResponse, 0, sizeof(g_doipDeferredNegativeResponse));
+        return;
+    }
+
+    udsResLen = DoIP_BuildNegativeResponse(udsRes,
+                                           g_doipDeferredNegativeResponse.requestSid,
+                                           g_doipDeferredNegativeResponse.nrc);
+
+    if (DoIP_SendDiagResponse(g_doipDeferredNegativeResponse.pcb,
+                              g_doipDeferredNegativeResponse.testerAddr,
+                              udsRes,
+                              udsResLen) == TRUE)
+    {
+        memset((void *)&g_doipDeferredNegativeResponse, 0, sizeof(g_doipDeferredNegativeResponse));
+    }
+}
+
+static void DoIP_PollCore1Response(void)
+{
+    uint8 udsRes[APP_DIAG_CORE1_TX_BUF_SIZE];
+    uint16 udsResLen = 0u;
+    AppDiagCore1ResponseStatus responseStatus;
+    boolean responseConsumed = FALSE;
+
+    if (g_doipPendingCore1Response.active != TRUE)
+    {
+        return;
+    }
+
+    responseStatus = AppDiagCore1_TryReadResponse(udsRes, &udsResLen);
+    if (responseStatus == APP_DIAG_CORE1_RESPONSE_NOT_READY)
+    {
+        return;
+    }
+
+    if (responseStatus == APP_DIAG_CORE1_RESPONSE_ERROR)
+    {
+        udsResLen = DoIP_BuildNegativeResponse(udsRes,
+                                               g_doipPendingCore1Response.requestSid,
+                                               0x10u);
+    }
+
+    if ((g_doipPendingCore1Response.pcb == NULL) ||
+        (g_doipPendingCore1Response.session == NULL) ||
+        (g_doipPendingCore1Response.session->state != DOIP_STATE_ROUTING_ACTIVE) ||
+        (udsResLen == 0u))
+    {
+        responseConsumed = TRUE;
+    }
+    else
+    {
+        responseConsumed = DoIP_SendDiagResponse(g_doipPendingCore1Response.pcb,
+                                                 g_doipPendingCore1Response.testerAddr,
+                                                 udsRes,
+                                                 udsResLen);
+    }
+
+    if (responseConsumed == TRUE)
+    {
+        AppDiagCore1_ReleaseResponse();
+        memset((void *)&g_doipPendingCore1Response, 0, sizeof(g_doipPendingCore1Response));
+    }
+}
+
+static void DoIP_ForgetPendingSession(tcpPcb *tpcb, DoIPSession *ds)
+{
+    if ((g_doipPendingCore1Response.active == TRUE) &&
+        ((g_doipPendingCore1Response.pcb == tpcb) ||
+         (g_doipPendingCore1Response.session == ds)))
+    {
+        g_doipPendingCore1Response.pcb = NULL;
+        g_doipPendingCore1Response.session = NULL;
+    }
+
+    if ((g_doipDeferredNegativeResponse.active == TRUE) &&
+        ((g_doipDeferredNegativeResponse.pcb == tpcb) ||
+         (g_doipDeferredNegativeResponse.session == ds)))
+    {
+        memset((void *)&g_doipDeferredNegativeResponse, 0, sizeof(g_doipDeferredNegativeResponse));
     }
 }
 
@@ -318,10 +506,16 @@ static void DoIP_BuildHeader(uint8 *buf, uint16 payloadType, uint32 payloadLen)
 }
 
 /* Echo.c echoSend() 역할 */
-static void DoIP_SendRaw(tcpPcb *tpcb, uint8 *buf, uint16 len)
+static err_t DoIP_SendRaw(tcpPcb *tpcb, uint8 *buf, uint16 len)
 {
-    tcp_write(tpcb, buf, len, TCP_WRITE_FLAG_COPY);
-    tcp_output(tpcb);
+    err_t err = tcp_write(tpcb, buf, len, TCP_WRITE_FLAG_COPY);
+
+    if (err == ERR_OK)
+    {
+        (void)tcp_output(tpcb);
+    }
+
+    return err;
 }
 
 /*********************************************************************************************************************/

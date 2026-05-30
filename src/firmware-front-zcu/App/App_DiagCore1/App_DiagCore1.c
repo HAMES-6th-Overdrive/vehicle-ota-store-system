@@ -44,14 +44,111 @@ void AppDiagCore1_Init(void)
     __dsync();
 }
 
+boolean AppDiagCore1_TryStartRequest(const uint8 *rxData,
+                                      uint16 rxLen)
+{
+    if ((rxData == NULL) ||
+        (rxLen == 0u) || (rxLen > APP_DIAG_CORE1_RX_BUF_SIZE))
+    {
+        g_error_count++;
+        return FALSE;
+    }
+
+    if (g_diagCore1.state != APP_DIAG_CORE1_STATE_IDLE)
+    {
+        g_busy_count++;
+        return FALSE;
+    }
+
+    memcpy((void *)g_diagCore1.rx, rxData, rxLen);
+    g_diagCore1.rxLen = rxLen;
+    g_diagCore1.txLen = 0u;
+    g_diagCore1.error = 0u;
+    __dsync();
+
+    g_diagCore1.state = APP_DIAG_CORE1_STATE_PENDING;
+    g_req_count++;
+    __dsync();
+
+    return TRUE;
+}
+
+AppDiagCore1ResponseStatus AppDiagCore1_TryReadResponse(uint8 *txData,
+                                                        uint16 *txLen)
+{
+    if ((txData == NULL) || (txLen == NULL))
+    {
+        g_error_count++;
+        return APP_DIAG_CORE1_RESPONSE_ERROR;
+    }
+
+    __dsync();
+
+    if (g_diagCore1.state == APP_DIAG_CORE1_STATE_ERROR)
+    {
+        *txLen = 0u;
+        return APP_DIAG_CORE1_RESPONSE_ERROR;
+    }
+
+    if (g_diagCore1.state != APP_DIAG_CORE1_STATE_DONE)
+    {
+        return APP_DIAG_CORE1_RESPONSE_NOT_READY;
+    }
+
+    if (g_diagCore1.txLen > APP_DIAG_CORE1_TX_BUF_SIZE)
+    {
+        *txLen = 0u;
+        g_diagCore1.error = 1u;
+        g_diagCore1.state = APP_DIAG_CORE1_STATE_ERROR;
+        g_error_count++;
+        __dsync();
+        return APP_DIAG_CORE1_RESPONSE_ERROR;
+    }
+
+    *txLen = g_diagCore1.txLen;
+    if (*txLen > 0u)
+    {
+        memcpy(txData, (const void *)g_diagCore1.tx, *txLen);
+    }
+
+    return APP_DIAG_CORE1_RESPONSE_READY;
+}
+
+void AppDiagCore1_ReleaseResponse(void)
+{
+    AppDiagCore1State state;
+
+    __dsync();
+    state = g_diagCore1.state;
+
+    if ((state != APP_DIAG_CORE1_STATE_DONE) &&
+        (state != APP_DIAG_CORE1_STATE_ERROR))
+    {
+        return;
+    }
+
+    g_diagCore1.rxLen = 0u;
+    g_diagCore1.txLen = 0u;
+    g_diagCore1.error = 0u;
+    g_diagCore1.state = APP_DIAG_CORE1_STATE_IDLE;
+
+    if (state == APP_DIAG_CORE1_STATE_DONE)
+    {
+        g_done_count++;
+    }
+
+    __dsync();
+}
+
 boolean AppDiagCore1_RequestBlocking(const uint8 *rxData,
                                       uint16 rxLen,
                                       uint8 *txData,
                                       uint16 *txLen,
                                       uint32 timeoutMs)
 {
-    if ((rxData == NULL) || (txData == NULL) || (txLen == NULL) ||
-        (rxLen == 0u) || (rxLen > APP_DIAG_CORE1_RX_BUF_SIZE))
+    AppDiagCore1ResponseStatus responseStatus;
+
+    if ((txData == NULL) || (txLen == NULL))
     {
         g_error_count++;
         return FALSE;
@@ -68,15 +165,10 @@ boolean AppDiagCore1_RequestBlocking(const uint8 *rxData,
         return FALSE;
     }
 
-    memcpy((void *)g_diagCore1.rx, rxData, rxLen);
-    g_diagCore1.rxLen = rxLen;
-    g_diagCore1.txLen = 0u;
-    g_diagCore1.error = 0u;
-    __dsync();
-
-    g_diagCore1.state = APP_DIAG_CORE1_STATE_PENDING;
-    g_req_count++;
-    __dsync();
+    if (AppDiagCore1_TryStartRequest(rxData, rxLen) != TRUE)
+    {
+        return FALSE;
+    }
 
     if (AppDiagCore1_WaitForDone(timeoutMs) != TRUE)
     {
@@ -84,31 +176,14 @@ boolean AppDiagCore1_RequestBlocking(const uint8 *rxData,
         return FALSE;
     }
 
-    if (g_diagCore1.state != APP_DIAG_CORE1_STATE_DONE)
+    responseStatus = AppDiagCore1_TryReadResponse(txData, txLen);
+    if (responseStatus != APP_DIAG_CORE1_RESPONSE_READY)
     {
-        g_error_count++;
-        g_diagCore1.state = APP_DIAG_CORE1_STATE_IDLE;
-        __dsync();
+        AppDiagCore1_ReleaseResponse();
         return FALSE;
     }
 
-    if (g_diagCore1.txLen > APP_DIAG_CORE1_TX_BUF_SIZE)
-    {
-        g_error_count++;
-        g_diagCore1.state = APP_DIAG_CORE1_STATE_IDLE;
-        __dsync();
-        return FALSE;
-    }
-
-    *txLen = g_diagCore1.txLen;
-    if (*txLen > 0u)
-    {
-        memcpy(txData, (const void *)g_diagCore1.tx, *txLen);
-    }
-
-    g_diagCore1.state = APP_DIAG_CORE1_STATE_IDLE;
-    g_done_count++;
-    __dsync();
+    AppDiagCore1_ReleaseResponse();
 
     return TRUE;
 }
