@@ -49,6 +49,49 @@
 #define ERASEWRAPPER_ADDR   (WRITEPAGE_ADDR     + WRITEPAGE_LEN)
 #define WRITEWRAPPER_ADDR   (ERASEWRAPPER_ADDR  + ERASEWRAPPER_LEN)
 
+/* ── OTA Sparse Metadata 정의 ───────────────────────────────── */
+
+#define OTA_META_VERSION          0x00000001UL
+#define OTA_META_MAX_SEGMENTS     8U
+
+/*
+ * DFLASH layout:
+ *
+ * 0xAF000000 + 0x00 : magic         = 0xDEADBEEF
+ * 0xAF000000 + 0x04 : version       = 1
+ * 0xAF000000 + 0x08 : virtualSize   = 전체 CRC 대상 크기
+ * 0xAF000000 + 0x0C : gapFill       = sparse gap fill byte, 현재 0x00
+ * 0xAF000000 + 0x10 : expectedCrc32 = 최종 virtual image CRC
+ * 0xAF000000 + 0x14 : segmentCount
+ * 0xAF000000 + 0x18 : reserved0
+ * 0xAF000000 + 0x1C : reserved1
+ * 0xAF000000 + 0x20 : segment[0]
+ */
+typedef struct
+{
+    uint32 offset;
+    uint32 size;
+    uint32 crc32;
+    uint32 reserved;
+} OtaSegmentMeta_t;
+
+typedef struct
+{
+    uint32 magic;
+    uint32 version;
+
+    uint32 virtualSize;
+    uint32 gapFill;
+
+    uint32 expectedCrc32;
+    uint32 segmentCount;
+
+    uint32 reserved0;
+    uint32 reserved1;
+
+    OtaSegmentMeta_t segments[OTA_META_MAX_SEGMENTS];
+} OtaPendingMeta_t;
+
 /* ── 함수 포인터 구조체 ──────────────────────────────────────── */
 typedef struct
 {
@@ -67,6 +110,9 @@ boolean OTA_Flash_Write(uint32 addr, uint8 *data, uint16 len, IfxFlash_FlashType
 boolean OTA_Flash_VerifyCRC(uint32 addr, uint32 size, uint32 expectedCRC);
 void    OTA_Flash_SetFlag(uint32 fwSize, uint32 expectedCRC);
 void    OTA_Flash_ClearFlag(void);
+
+boolean OTA_Flash_ReadPendingMeta(OtaPendingMeta_t *meta);
+boolean OTA_Flash_VerifySparseCRC(uint32 targetBase, const OtaPendingMeta_t *meta);
 
 extern volatile uint32 g_TickCount_1ms;
 

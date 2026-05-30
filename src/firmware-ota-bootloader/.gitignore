@@ -26,3 +26,7 @@ Configurations/
 Libraries/Services/
 Libraries/Infra/
 Libraries/.ads/
+Libraries/.ads/clean.json
+Libraries/.ads/install.json
+Libraries/.ads/rollback.json
+Libraries/Infra/Platform/Tricore/Compilers/Compilers.h
