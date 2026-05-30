@@ -60,6 +60,7 @@
 #define UDS_NRC_REQUEST_OUT_OF_RANGE        0x31
 #define UDS_NRC_WRONG_BLOCK_SEQ_COUNTER     0x73
 #define UDS_NRC_GENERAL_PROG_FAILURE        0x72
+#define UDS_NRC_RESPONSE_PENDING            0x78
 
 #define APP_UDS_TASK_STACK_SIZE              (256u)
 #define APP_UDS_TASK_PRIORITY                (tskIDLE_PRIORITY + 5u)

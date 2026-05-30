@@ -31,8 +31,20 @@ typedef enum
     APP_DIAG_CORE1_STATE_ERROR
 } AppDiagCore1State;
 
+typedef enum
+{
+    APP_DIAG_CORE1_RESPONSE_NOT_READY = 0,
+    APP_DIAG_CORE1_RESPONSE_READY,
+    APP_DIAG_CORE1_RESPONSE_ERROR
+} AppDiagCore1ResponseStatus;
+
 void    AppDiagCore1_Init(void);
 void    AppDiagCore1_MainFunction(void);
+boolean AppDiagCore1_TryStartRequest(const uint8 *rxData,
+                                      uint16 rxLen);
+AppDiagCore1ResponseStatus AppDiagCore1_TryReadResponse(uint8 *txData,
+                                                        uint16 *txLen);
+void    AppDiagCore1_ReleaseResponse(void);
 boolean AppDiagCore1_RequestBlocking(const uint8 *rxData,
                                       uint16 rxLen,
                                       uint8 *txData,

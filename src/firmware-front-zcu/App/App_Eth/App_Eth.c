@@ -1,5 +1,6 @@
 #include "App_Eth.h"
 #include "App_DoIP.h"
+#include "App_SensorOtaGateway/App_SensorOtaGateway_Doip.h"
 #include "Ifx_Lwip.h"
 
 #define APP_ETH_TASK_STACK_SIZE (4096u)
@@ -56,6 +57,8 @@ static void AppEth_Task(void *arg)
         Ifx_Lwip_onTimerTick();
         Ifx_Lwip_pollTimerFlags();
         Ifx_Lwip_pollReceiveFlags();
+        DoIP_MainFunction();
+        AppSensorOtaGatewayDoip_MainFunction();
         AppEth_UpdateReadyState();
 
         vTaskDelay(pdMS_TO_TICKS(APP_ETH_TASK_PERIOD_MS));

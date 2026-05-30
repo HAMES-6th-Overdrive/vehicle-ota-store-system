@@ -59,6 +59,8 @@
  */
 #define APP_SENSOR_OTA_GATEWAY_UDS_DATA_SIZE          32U
 #define APP_SENSOR_OTA_GATEWAY_UDS_MAX_BLOCK_SIZE     34U
+#define APP_SENSOR_OTA_GATEWAY_UDS_RX_BUF_SIZE        256U
+#define APP_SENSOR_OTA_GATEWAY_UDS_TX_BUF_SIZE        256U
 
 #define APP_SENSOR_OTA_GATEWAY_UDS_NEGATIVE_RSP       0x7FU
 
@@ -96,6 +98,14 @@
 #define APP_SENSOR_OTA_GATEWAY_UDS_NRC_REQUEST_OUT_OF_RANGE        0x31U
 #define APP_SENSOR_OTA_GATEWAY_UDS_NRC_WRONG_BLOCK_SEQ_COUNTER     0x73U
 #define APP_SENSOR_OTA_GATEWAY_UDS_NRC_GENERAL_PROG_FAILURE        0x72U
+#define APP_SENSOR_OTA_GATEWAY_UDS_NRC_RESPONSE_PENDING            0x78U
+
+typedef enum
+{
+    APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_NOT_READY = 0,
+    APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_READY,
+    APP_SENSOR_OTA_GATEWAY_UDS_RESPONSE_ERROR
+} AppSensorOtaGatewayUds_ResponseStatus_t;
 
 
 #define APP_SENSOR_OTA_GATEWAY_UDS_SID_SPARSE_MANIFEST 0xB4U
@@ -119,6 +129,12 @@ void AppSensorOtaGatewayUds_Init(void);
  * 나중에 timeout 처리 등이 필요하면 이 함수에 추가한다.
  */
 void AppSensorOtaGatewayUds_Task(void);
+
+boolean AppSensorOtaGatewayUds_TryStartRequest(const uint8 *rxData,
+                                               uint16 rxLen);
+AppSensorOtaGatewayUds_ResponseStatus_t AppSensorOtaGatewayUds_TryReadResponse(uint8 *txData,
+                                                                               uint16 *txLen);
+void AppSensorOtaGatewayUds_ReleaseResponse(void);
 
 /**
  * @brief DoIP Diagnostic Message 안의 UDS payload 처리

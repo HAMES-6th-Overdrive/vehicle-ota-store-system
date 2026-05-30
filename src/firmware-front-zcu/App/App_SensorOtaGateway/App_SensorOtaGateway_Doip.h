@@ -103,6 +103,7 @@ typedef struct
  *  - Ethernet/lwIP 초기화 이후 호출해야 한다.
  */
 void AppSensorOtaGatewayDoip_Init(void);
+void AppSensorOtaGatewayDoip_MainFunction(void);
 
 boolean AppSensorOtaGatewayDoip_IsReady(void);
 
