@@ -73,7 +73,8 @@ OTA_RESET_TRIGGER_PROTOCOL = os.getenv("VEHICLE_OTA_RESET_TRIGGER_PROTOCOL", "ud
 OTA_RESET_TRIGGER_HOST = os.getenv("VEHICLE_OTA_RESET_TRIGGER_HOST", VEHICLE_TX_HOST)
 OTA_RESET_TRIGGER_PORT = int(os.getenv("VEHICLE_OTA_RESET_TRIGGER_PORT", str(VEHICLE_TX_PORT)))
 OTA_RESET_TRIGGER_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_TIMEOUT_SECONDS", "0.1"))
-OTA_RESET_TRIGGER_GAP_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_GAP_SECONDS", "0.05"))
+OTA_RESET_TRIGGER_GAP_SECONDS = float(os.getenv("VEHICLE_OTA_RESET_TRIGGER_GAP_SECONDS", "0.2"))
+FRONT_ZCU_TRANSFER_EXIT_DELAY_SECONDS = float(os.getenv("FRONT_ZCU_TRANSFER_EXIT_DELAY_SECONDS", "0.2"))
 VEHICLE_LINK_PING_ENABLED = os.getenv("VEHICLE_LINK_PING_ENABLED", "1") != "0"
 VEHICLE_LINK_PING_HOST = os.getenv("VEHICLE_LINK_PING_HOST", VEHICLE_TX_HOST)
 VEHICLE_LINK_PING_TIMEOUT_SECONDS = float(os.getenv("VEHICLE_LINK_PING_TIMEOUT_SECONDS", "0.75"))
@@ -155,6 +156,7 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "p2_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
         "p2_star_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_STAR_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
         "use_server_timing": os.getenv("FRONT_ZCU_UDS_USE_SERVER_TIMING", "0") == "1",
+        "transfer_exit_delay_seconds": FRONT_ZCU_TRANSFER_EXIT_DELAY_SECONDS,
     },
     "sensor-ecu": {
         "id": "sensor-ecu",
@@ -270,6 +272,7 @@ STORE_CATALOG = [
                 "p2_timeout_seconds": 60,
                 "p2_star_timeout_seconds": 60,
                 "use_server_timing": False,
+                "transfer_exit_delay_seconds": FRONT_ZCU_TRANSFER_EXIT_DELAY_SECONDS,
                 "release_patch_filter": 1,
             },
         ],
@@ -3163,6 +3166,11 @@ def api_server_worker(
             progress = ota_manager.progress_for(feature_id)
             if progress.get("active"):
                 return False
+            if (
+                progress.get("status") in {"complete", "failed", "error", "current"}
+                or progress.get("phase") in {"complete", "error"}
+            ):
+                return False
             last_attempt_at = store_ota_last_attempt_at.get(feature_id, 0.0)
             if time.time() - last_attempt_at < 5.0:
                 return False
@@ -3364,6 +3372,7 @@ def api_server_worker(
                     "p2_timeout_seconds": board["p2_timeout_seconds"],
                     "p2_star_timeout_seconds": board["p2_star_timeout_seconds"],
                     "use_server_timing": board["use_server_timing"],
+                    "transfer_exit_delay_seconds": board["transfer_exit_delay_seconds"],
                 }
                 flash_message = f"{board['name']} flashing"
             elif transport == "doip_sensor_can_ota":
