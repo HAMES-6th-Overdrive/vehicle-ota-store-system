@@ -1754,7 +1754,7 @@ class OtaManager:
                             offset=offset,
                         )
 
-                transfer_exit_delay = float(action.get("transfer_exit_delay_seconds", 0.0))
+                transfer_exit_delay = float(action.get("transfer_exit_delay_seconds", 0.5))
                 if transfer_exit_delay > 0:
                     time.sleep(transfer_exit_delay)
                 crc32 = zlib.crc32(firmware) & 0xFFFFFFFF
