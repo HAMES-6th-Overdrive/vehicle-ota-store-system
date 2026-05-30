@@ -122,6 +122,11 @@ input:checked+.ttrack::after{left:19px;background:var(--ac2);box-shadow:0 0 6px 
 input:disabled+.ttrack{opacity:.35;cursor:not-allowed}
 .fstatus{font-size:10px;font-weight:600;color:var(--txs)}
 .fstatus.on{color:var(--ac2)}
+.fprog{display:none;margin-top:8px}
+.fprog.show{display:block}
+.fprogline{height:6px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;border:1px solid rgba(255,255,255,.05)}
+.fprogbar{height:100%;width:0%;border-radius:inherit;background:linear-gradient(90deg,var(--ac),var(--ac2));transition:width .16s linear}
+.fprogmeta{margin-top:4px;display:flex;justify-content:space-between;gap:8px;font-size:9px;color:var(--txs);line-height:1.2}
 
 /* ══ 중앙: 속도 + 날씨 ══ */
 /* 1번: 창이 커지면 속도+날씨 커짐 */
@@ -545,6 +550,17 @@ function fmtFeatureVersion(fid, verObj) {
   const version = verObj.Feature || verObj[fid] || verObj.VehicleComputer;
   return version ? `v${version}` : null;
 }
+function otaBoardLabel(target) {
+  const value = String(target || '').toLowerCase();
+  if(value.includes('sensor')) return 'Sensor ECU CAN OTA';
+  if(value.includes('zcu')) return 'ZCU OTA';
+  if(value === 'vehicle') return 'Vehicle OTA';
+  return target || 'OTA';
+}
+function otaProgressPercent(progress) {
+  const value = Number(progress?.percent);
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0;
+}
 const DAYS = ['일','월','화','수','목','금','토'];
 
 let curTheme = 'dark';
@@ -659,7 +675,7 @@ function updateDash(d) {
   document.getElementById('lastsync').textContent = `동기화 ${d.time}`;
 
   // 기능 카드
-  renderCards(d);
+  renderCardsWithProgress(d);
 
   // 테마
   if(d.ui_theme && d.ui_theme !== curTheme) applyTheme(d.ui_theme);
@@ -752,6 +768,61 @@ function renderCards(d) {
 /* ════════════════════════
    토글
    ════════════════════════ */
+function renderCardsWithProgress(d) {
+  const pur = d.purchased||[], inst = d.installed||[], active = d.active||{}, vers = d.versions||{}, otaProgress = d.ota_progress||{};
+  const empty = document.getElementById('fempty');
+  const cards = document.getElementById('fcards');
+
+  if(pur.length === 0) {
+    empty.style.display = 'flex';
+    cards.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  cards.style.display = 'flex';
+  cards.innerHTML = '';
+
+  pur.forEach(fid => {
+    const m = CATALOG.find(c=>c.id===fid);
+    if(!m) return;
+    const isOn = active[fid]??false;
+    const installed = inst.includes(fid);
+    const progress = otaProgress[fid] || {};
+    const installing = Boolean(progress.active);
+    const progressPercent = otaProgressPercent(progress);
+    const progressBoard = otaBoardLabel(progress.target);
+    const verStr = fmtFeatureVersion(fid, vers[fid]);
+    const verTag = verStr
+      ? `<span class="fver">${verStr}</span>`
+      : `<span class="fver pending">아직 미설치</span>`;
+    const statusText = installing
+      ? `설치중 · ${progressBoard} ${progressPercent}%`
+      : (!installed ? '아직 미설치' : (isOn ? '활성화' : '비활성화'));
+
+    const div = document.createElement('div');
+    div.className = 'fcard'+(isOn?' on':'');
+    div.innerHTML = `
+      <div class="ftop">
+        <div class="fnamerow">
+          <span class="ficon">${m.icon}</span>
+          <span class="fname">${m.name}</span>
+          ${verTag}
+        </div>
+        <label class="tgl">
+          <input type="checkbox" ${isOn?'checked':''} ${!installed?'disabled':''}
+            onchange="toggleFeat('${fid}',this)">
+          <div class="ttrack"></div>
+        </label>
+      </div>
+      <div class="fstatus ${isOn?'on':''}">${statusText}</div>
+      <div class="fprog ${installing?'show':''}">
+        <div class="fprogline"><div class="fprogbar" style="width:${progressPercent}%"></div></div>
+        <div class="fprogmeta"><span>${progressBoard}</span><span>${progressPercent}%</span></div>
+      </div>`;
+    cards.appendChild(div);
+  });
+}
+
 async function toggleFeat(fid, cb) {
   cb.disabled = true;
   try {

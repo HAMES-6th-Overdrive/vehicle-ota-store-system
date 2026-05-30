@@ -479,6 +479,13 @@ function itemAction(item) {
     return { label: "다운로드", endpoint: "/api/store/download", disabled: false };
   }
   if (item.downloadable && item.downloaded && !item.applied) {
+    if (item.id === "AEB") {
+      return {
+        label: item.ota_progress?.active ? "설치중" : "OTA 시작",
+        endpoint: "/api/store/download",
+        disabled: Boolean(item.ota_progress?.active),
+      };
+    }
     return { label: "적용 대기", endpoint: "/api/store/download", disabled: true };
   }
   return { label: item.downloadable ? "다운로드됨" : "구매됨", endpoint: "/api/store/purchase", disabled: true };
