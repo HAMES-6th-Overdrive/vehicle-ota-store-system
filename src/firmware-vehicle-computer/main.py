@@ -209,6 +209,7 @@ BOARD_VERSION_CONFIGS: dict[str, dict[str, Any]] = {
 
 
 logger = logging.getLogger("vehicle-computer")
+ZCU_NETWORK_LOCK = threading.RLock()
 
 
 STORE_CATALOG = [
@@ -1655,8 +1656,9 @@ class VehicleStatus:
 
 
 class FirmwareVersionStore:
-    def __init__(self) -> None:
+    def __init__(self, *, network_lock: Any | None = None) -> None:
         self._lock = threading.RLock()
+        self._network_lock = network_lock
         self._versions: dict[str, str] = {
             VEHICLE_COMPUTER_VERSION_TARGET: VEHICLE_COMPUTER_FIRMWARE_VERSION,
             "ZCU": "-",
@@ -1703,8 +1705,13 @@ class FirmwareVersionStore:
                 return dict(self._versions)
 
         for board_name, config in BOARD_VERSION_CONFIGS.items():
+            with self._lock:
+                if self._suspended_reason is not None:
+                    break
             try:
                 version = self._query_board_version(board_name, config)
+            except InterruptedError:
+                break
             except Exception as exc:
                 with self._lock:
                     self._last_error[board_name] = f"{type(exc).__name__}: {exc}"
@@ -1751,14 +1758,25 @@ class FirmwareVersionStore:
             client_id=DRIVE_CLIENT_ID,
             session_id=session_id,
         )
-        response = send_ethernet_message(
-            FIRMWARE_VERSION_PROTOCOL,
-            str(config["host"]),
-            int(config["port"]),
-            packet,
-            timeout_seconds=FIRMWARE_VERSION_TIMEOUT_SECONDS,
-            expect_response=True,
-        )
+
+        def send_query() -> Any:
+            with self._lock:
+                if self._suspended_reason is not None:
+                    raise InterruptedError("firmware version polling suspended")
+            return send_ethernet_message(
+                FIRMWARE_VERSION_PROTOCOL,
+                str(config["host"]),
+                int(config["port"]),
+                packet,
+                timeout_seconds=FIRMWARE_VERSION_TIMEOUT_SECONDS,
+                expect_response=True,
+            )
+
+        if self._network_lock is not None:
+            with self._network_lock:
+                response = send_query()
+        else:
+            response = send_query()
         if not response.response_base64:
             raise RuntimeError("empty SOME/IP response")
 
@@ -1842,10 +1860,12 @@ class PingReachabilityStatus:
         host: str,
         timeout_seconds: float,
         enabled: bool = True,
+        network_lock: Any | None = None,
     ) -> None:
         self.host = host
         self.timeout_seconds = timeout_seconds
         self.enabled = enabled
+        self._network_lock = network_lock
         self._lock = threading.RLock()
         self._status = "checking" if enabled else "disabled"
         self._checked_at: str | None = None
@@ -1871,17 +1891,30 @@ class PingReachabilityStatus:
         else:
             command = ["ping", "-c", "1", "-W", str(max(1, int(self.timeout_seconds))), self.host]
 
-        started = time.monotonic()
-        try:
-            completed = subprocess.run(
+        def run_ping() -> subprocess.CompletedProcess[str]:
+            with self._lock:
+                if self._suspended_reason is not None:
+                    raise InterruptedError("ping suspended")
+            return subprocess.run(
                 command,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_seconds + 0.5,
             )
+
+        started = time.monotonic()
+        try:
+            if self._network_lock is not None:
+                with self._network_lock:
+                    completed = run_ping()
+            else:
+                completed = run_ping()
             latency_ms = int((time.monotonic() - started) * 1000)
             status = "connected" if completed.returncode == 0 else "disconnected"
             error = None if completed.returncode == 0 else (completed.stderr or completed.stdout).strip()
+        except InterruptedError:
+            with self._lock:
+                return self.snapshot()
         except (OSError, subprocess.TimeoutExpired) as exc:
             latency_ms = None
             status = "disconnected"
@@ -2380,14 +2413,15 @@ def api_server_worker(
                         session_id=next_ota_reset_session_id(),
                         message_type=0x02,
                     )
-                    response = send_ethernet_message(
-                        OTA_RESET_TRIGGER_PROTOCOL,
-                        OTA_RESET_TRIGGER_HOST,
-                        OTA_RESET_TRIGGER_PORT,
-                        packet,
-                        timeout_seconds=OTA_RESET_TRIGGER_TIMEOUT_SECONDS,
-                        expect_response=False,
-                    )
+                    with ZCU_NETWORK_LOCK:
+                        response = send_ethernet_message(
+                            OTA_RESET_TRIGGER_PROTOCOL,
+                            OTA_RESET_TRIGGER_HOST,
+                            OTA_RESET_TRIGGER_PORT,
+                            packet,
+                            timeout_seconds=OTA_RESET_TRIGGER_TIMEOUT_SECONDS,
+                            expect_response=False,
+                        )
                     payload.update({"success": True, "bytes_sent": response.bytes_sent})
                     logger.info(
                         "OTA reset trigger sent: %s service=0x%04x event=0x%04x target=%s:%s",
@@ -3351,7 +3385,7 @@ def api_server_worker(
 def build_supervisor() -> Supervisor:
     supervisor = Supervisor()
     vehicle_status = VehicleStatus()
-    firmware_versions = FirmwareVersionStore()
+    firmware_versions = FirmwareVersionStore(network_lock=ZCU_NETWORK_LOCK)
     packet_sender = VehiclePacketSender()
     internet_status = InternetConnectivityStatus(
         host=INTERNET_CHECK_HOST,
@@ -3362,16 +3396,17 @@ def build_supervisor() -> Supervisor:
         host=VEHICLE_LINK_PING_HOST,
         timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
         enabled=VEHICLE_LINK_PING_ENABLED,
+        network_lock=ZCU_NETWORK_LOCK,
     )
     front_zcu_ping = PingReachabilityStatus(
         host=FRONT_ZCU_PING_HOST,
         timeout_seconds=VEHICLE_LINK_PING_TIMEOUT_SECONDS,
         enabled=VEHICLE_LINK_PING_ENABLED,
+        network_lock=ZCU_NETWORK_LOCK,
     )
 
     def set_flash_active(active: bool) -> None:
         reason = "ZCU flashing" if active else None
-        packet_sender.set_suspended(reason)
         firmware_versions.set_suspended(reason)
         vehicle_link_ping.set_suspended(reason)
         front_zcu_ping.set_suspended(reason)
@@ -3382,6 +3417,7 @@ def build_supervisor() -> Supervisor:
         firmware_dir=FIRMWARE_DIR,
         timeout_seconds=OTA_DOWNLOAD_TIMEOUT_SECONDS,
         flash_state_callback=set_flash_active,
+        flash_network_lock=ZCU_NETWORK_LOCK,
     )
     feature_state_store = FeatureStateStore(
         FEATURE_STATE_FILE,
