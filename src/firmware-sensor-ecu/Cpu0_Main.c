@@ -13,10 +13,9 @@
 #include "FlashOta.h"
 #include "UdsOta.h"
 #include "UART_VCOM.h"
+#include "AppVersion.h"
 #include "IfxAsclin_Asc.h"
 #include <stdio.h>
-
-#define APP_SENSOR_VERSION "2.0.0"
 
 //#define SLOW
 IFX_ALIGN(4) IfxCpu_syncEvent g_cpuSyncEvent = 0;
