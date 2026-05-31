@@ -104,7 +104,6 @@ FIRMWARE_VERSION_SERVICE_ID = int(
 )
 VEHICLE_COMPUTER_VERSION_TARGET = "VehicleComputer"
 VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.5.0")
-FRONT_ZCU_FIRMWARE_VERSION = os.getenv("FRONT_ZCU_FIRMWARE_VERSION", "1.5.0")
 FEATURE_VERSION_TARGET = "Feature"
 
 # SOME/IP IDs for Drive Service / Drive method.
@@ -178,14 +177,15 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
 }
 
 BOARD_VERSION_CONFIGS: dict[str, dict[str, Any]] = {
-    "MotorECU": {
-        "board_id": "drive-ecu",
+    "ZCU": {
+        "board_id": "front-zcu",
         "host": os.getenv("FRONT_ZCU_VERSION_HOST", "192.168.10.2"),
         "port": int(os.getenv("FRONT_ZCU_VERSION_PORT", str(FIRMWARE_VERSION_PORT))),
+        "service_id": int(os.getenv("GET_FRONT_ECU_VERSION_SERVICE_ID", str(DEFAULT_INFO_SERVICE_ID)), 0),
         "method_id": int(
-            os.getenv("GET_DRIVE_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_DRIVE_ECU_VERSION_METHOD_ID)), 0
+            os.getenv("GET_FRONT_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_FRONT_ECU_VERSION_METHOD_ID)), 0
         ),
-        "method_name": "GetDriveEcuVersion",
+        "method_name": "GetFrontEcuVersion",
     },
     "SensorECU": {
         "board_id": "sensor-ecu",
@@ -195,15 +195,6 @@ BOARD_VERSION_CONFIGS: dict[str, dict[str, Any]] = {
             os.getenv("GET_SENSOR_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_SENSOR_ECU_VERSION_METHOD_ID)), 0
         ),
         "method_name": "GetSensorEcuVersion",
-    },
-    "AEB": {
-        "board_id": "aeb",
-        "host": os.getenv("FRONT_ZCU_VERSION_HOST", "192.168.10.2"),
-        "port": int(os.getenv("FRONT_ZCU_VERSION_PORT", str(FIRMWARE_VERSION_PORT))),
-        "method_id": int(
-            os.getenv("GET_AEB_VERSION_METHOD_ID", str(DEFAULT_GET_AEB_VERSION_METHOD_ID)), 0
-        ),
-        "method_name": "GetAebVersion",
     },
 }
 
@@ -2039,11 +2030,10 @@ class FirmwareVersionStore:
         self._network_lock = network_lock
         self._versions: dict[str, str] = {
             VEHICLE_COMPUTER_VERSION_TARGET: VEHICLE_COMPUTER_FIRMWARE_VERSION,
-            "ZCU": FRONT_ZCU_FIRMWARE_VERSION,
-            "MotorECU": "-",
+            "ZCU": "-",
+            "MotorECU": "1.0.0",
             "SensorECU": "-",
             "CameraECU": "1.0.0",
-            "AEB": "-",
         }
         self._last_error: dict[str, str] = {}
         self._last_success_at: str | None = None
@@ -2068,6 +2058,7 @@ class FirmwareVersionStore:
                 "service_id": FIRMWARE_VERSION_SERVICE_ID,
                 "methods": {
                     board_name: {
+                        "service_id": config.get("service_id", FIRMWARE_VERSION_SERVICE_ID),
                         "method_id": config["method_id"],
                         "method_name": config["method_name"],
                     }
@@ -2128,10 +2119,11 @@ class FirmwareVersionStore:
             self._session_id = (self._session_id + 1) & 0xFFFF
             session_id = self._session_id or 1
 
+        service_id = int(config.get("service_id", FIRMWARE_VERSION_SERVICE_ID))
         method_id = int(config["method_id"])
         packet = build_someip_packet(
             b"",
-            service_id=FIRMWARE_VERSION_SERVICE_ID,
+            service_id=service_id,
             method_id=method_id,
             client_id=DRIVE_CLIENT_ID,
             session_id=session_id,
@@ -2162,7 +2154,7 @@ class FirmwareVersionStore:
         message = parse_someip_packet(raw)
         if message is None:
             raise RuntimeError("invalid SOME/IP response")
-        if message.service_id != FIRMWARE_VERSION_SERVICE_ID:
+        if message.service_id != service_id:
             raise RuntimeError(f"unexpected service id: 0x{message.service_id:04x}")
         if message.method_id != method_id:
             raise RuntimeError(f"unexpected method id: 0x{message.method_id:04x}")
