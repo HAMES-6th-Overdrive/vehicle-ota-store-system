@@ -105,6 +105,10 @@ FIRMWARE_VERSION_SERVICE_ID = int(
 VEHICLE_COMPUTER_VERSION_TARGET = "VehicleComputer"
 VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.0.0")
 FEATURE_VERSION_TARGET = "Feature"
+FIRMWARE_VERSION_DISPLAY_DEFAULTS = {
+    "MotorECU": "1.0.0",
+    "CameraECU": "1.0.0",
+}
 
 # SOME/IP IDs for Drive Service / Drive method.
 DRIVE_SERVICE_ID = DEFAULT_DRIVE_SERVICE_ID
@@ -1073,7 +1077,7 @@ class FeatureStateStore:
         if self.firmware_versions is None:
             return None
         try:
-            snapshot = self.firmware_versions.snapshot()
+            snapshot = self.firmware_versions.snapshot(display_defaults=False)
         except Exception:
             return None
         keys = (
@@ -2284,14 +2288,23 @@ class FirmwareVersionStore:
         self._suspended_reason: str | None = None
         self._session_id = 0
 
-    def snapshot(self) -> dict[str, str]:
+    def _with_display_defaults(self, versions: dict[str, str]) -> dict[str, str]:
+        display_versions = dict(versions)
+        for board_name, fallback in FIRMWARE_VERSION_DISPLAY_DEFAULTS.items():
+            value = str(display_versions.get(board_name) or "").strip()
+            if not value or value == "-":
+                display_versions[board_name] = fallback
+        return display_versions
+
+    def snapshot(self, *, display_defaults: bool = True) -> dict[str, str]:
         with self._lock:
-            return dict(self._versions)
+            versions = dict(self._versions)
+        return self._with_display_defaults(versions) if display_defaults else versions
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
-                "versions": dict(self._versions),
+                "versions": self._with_display_defaults(dict(self._versions)),
                 "errors": dict(self._last_error),
                 "last_success_at": self._last_success_at,
                 "last_success_target": self._last_success_target,
