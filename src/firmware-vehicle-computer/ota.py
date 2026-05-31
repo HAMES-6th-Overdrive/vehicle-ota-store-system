@@ -24,9 +24,6 @@ SENSOR_GATEWAY_PT_ROUTING_ACT_REQ = 0x0005
 SENSOR_GATEWAY_PT_ROUTING_ACT_RES = 0x0006
 SENSOR_GATEWAY_PT_DIAG_MESSAGE = 0x8001
 SENSOR_GATEWAY_PT_DIAG_ACK = 0x8002
-SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD = 64
-SENSOR_CAN_OTA_TRANSFER_OVERHEAD = 2
-SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE = SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD - SENSOR_CAN_OTA_TRANSFER_OVERHEAD
 
 
 class SensorGatewayDoipError(RuntimeError):
@@ -1816,7 +1813,7 @@ class OtaManager:
         tester_address = int(action.get("tester_address", 0x0E00))
         zcu_address = int(action.get("ecu_address", action.get("zcu_address", 0x0001)))
         app_addr = int(action.get("app_addr", action.get("bank_start", 0x80020000)))
-        block_size = int(action.get("block_size", SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE))
+        block_size = int(action.get("block_size", 32))
         request_timeout = float(action.get("timeout_seconds", 60.0))
         block_delay = float(action.get("block_delay_seconds", 0.0))
         activate = bool(action.get("activate_after_transfer", False))
@@ -1824,11 +1821,8 @@ class OtaManager:
         percent_end = int((progress or {}).get("percent_end", 100))
         progress_update_interval_blocks = max(1, int(action.get("progress_update_interval_blocks", 1)))
 
-        if block_size <= 0 or block_size > SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE:
-            raise ValueError(
-                f"block_size must be 1..{SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE} "
-                "for Sensor ECU CAN OTA gateway"
-            )
+        if block_size <= 0 or block_size > 32:
+            raise ValueError("block_size must be 1..32 for Sensor ECU CAN OTA gateway")
 
         crc32 = zlib.crc32(firmware) & 0xFFFFFFFF
 
@@ -1916,12 +1910,7 @@ class OtaManager:
 
                 if len(response) >= 4:
                     max_block = int.from_bytes(response[2:4], "big")
-                    max_payload = max_block - SENSOR_CAN_OTA_TRANSFER_OVERHEAD
-                    if max_payload <= 0:
-                        raise SensorGatewayDoipError(
-                            f"invalid Sensor RequestDownload maxBlock={max_block}"
-                        )
-                    data_block_size = min(block_size, max_payload)
+                    data_block_size = max(1, min(block_size, max_block - 2))
                 else:
                     data_block_size = block_size
                 set_progress("install", "flashing", percent_start, f"Sensor RequestDownload OK: block={data_block_size}")
