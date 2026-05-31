@@ -29,6 +29,7 @@ SENSOR_GATEWAY_UDS_NRC_RESPONSE_PENDING = 0x78
 SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD = 64
 SENSOR_CAN_OTA_TRANSFER_OVERHEAD = 2
 SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE = SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD - SENSOR_CAN_OTA_TRANSFER_OVERHEAD
+FIRMWARE_BIN_ACTION_TYPES = {"doip_uds_flash", "doip_sensor_can_ota"}
 
 
 class SensorGatewayDoipError(RuntimeError):
@@ -673,6 +674,10 @@ class OtaManager:
         self._flash_state_depth = 0
         self._progress_lock = threading.Lock()
         self._progress: dict[str, dict[str, Any]] = {}
+        self.release_cache_seconds = float(os.getenv("VEHICLE_OTA_RELEASE_CACHE_SECONDS", "300"))
+        self.release_error_cache_seconds = float(os.getenv("VEHICLE_OTA_RELEASE_ERROR_CACHE_SECONDS", "60"))
+        self._release_cache_lock = threading.Lock()
+        self._release_cache: dict[str, dict[str, Any]] = {}
         self._actions: dict[str, OtaAction] = {
             LocalFileAction.action_type: LocalFileAction(),
             GithubReleaseFileAction.action_type: GithubReleaseFileAction(),
@@ -1318,11 +1323,84 @@ class OtaManager:
             return source
         return self.base_dir / source
 
+    def _release_cache_key(self, repo: str, action: dict[str, Any]) -> str:
+        patch_filter = action.get("release_patch_filter")
+        version_selector = f"patch:{int(patch_filter)}" if patch_filter is not None else "latest"
+        bin_selector = "bin:1" if self._action_requires_single_bin_asset(action) else "bin:0"
+        return "|".join((repo, version_selector, bin_selector))
+
+    @staticmethod
+    def _clone_release(release: dict[str, Any]) -> dict[str, Any]:
+        cloned = dict(release)
+        assets = release.get("assets")
+        if isinstance(assets, list):
+            cloned["assets"] = [dict(asset) for asset in assets if isinstance(asset, dict)]
+        return cloned
+
+    def _cached_release(self, cache_key: str) -> dict[str, Any] | None:
+        now = time.time()
+        with self._release_cache_lock:
+            entry = self._release_cache.get(cache_key)
+            if not entry:
+                return None
+            cached_at = float(entry.get("cached_at", 0))
+            ttl_seconds = float(entry.get("ttl_seconds", 0))
+            if ttl_seconds <= 0 or now - cached_at >= ttl_seconds:
+                self._release_cache.pop(cache_key, None)
+                return None
+            if entry.get("error"):
+                raise RuntimeError(str(entry["error"]))
+            release = entry.get("release")
+            if not isinstance(release, dict):
+                self._release_cache.pop(cache_key, None)
+                return None
+            return self._clone_release(release)
+
+    def _cache_release(self, cache_key: str, release: dict[str, Any]) -> None:
+        if self.release_cache_seconds <= 0:
+            return
+        with self._release_cache_lock:
+            self._release_cache[cache_key] = {
+                "cached_at": time.time(),
+                "ttl_seconds": self.release_cache_seconds,
+                "release": self._clone_release(release),
+            }
+
+    def _cache_release_error(self, cache_key: str, exc: RuntimeError) -> None:
+        if self.release_error_cache_seconds <= 0:
+            return
+        with self._release_cache_lock:
+            self._release_cache[cache_key] = {
+                "cached_at": time.time(),
+                "ttl_seconds": self.release_error_cache_seconds,
+                "error": str(exc),
+            }
+
     def fetch_latest_release(self, catalog_item: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
         repo = action.get("release_repo") or catalog_item.get("release_repo")
         if not repo:
             raise ValueError(f"release repo is not configured: {catalog_item['id']}")
 
+        cache_key = self._release_cache_key(str(repo), action)
+        cached_release = self._cached_release(cache_key)
+        if cached_release is not None:
+            return cached_release
+
+        try:
+            release = self._fetch_latest_release_uncached(catalog_item, action, str(repo))
+        except RuntimeError as exc:
+            self._cache_release_error(cache_key, exc)
+            raise
+
+        self._cache_release(cache_key, release)
+        return release
+
+    def _fetch_latest_release_uncached(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+        repo: str,
+    ) -> dict[str, Any]:
         if action.get("release_patch_filter") is not None:
             expected_patch = int(action["release_patch_filter"])
             try:
@@ -1336,8 +1414,17 @@ class OtaManager:
                     raise
                 return self.fetch_highest_patch_release_from_github_web(
                     repo,
+                    action,
                     expected_patch=expected_patch,
                 )
+
+        if self._action_requires_single_bin_asset(action):
+            try:
+                return self.fetch_highest_release_with_bin_asset(catalog_item, action)
+            except RuntimeError as exc:
+                if "download failed (403)" not in str(exc):
+                    raise
+                return self.fetch_highest_release_with_bin_asset_from_github_web(repo)
 
         url = f"https://api.github.com/repos/{repo}/releases/latest"
         try:
@@ -1368,6 +1455,7 @@ class OtaManager:
         if not isinstance(payload, list):
             raise RuntimeError(f"release list payload is invalid: {repo}")
 
+        requires_bin_asset = self._action_requires_single_bin_asset(action)
         candidates: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
         for release in payload:
             if not isinstance(release, dict):
@@ -1377,12 +1465,74 @@ class OtaManager:
             version = release_version_tuple(str(release.get("tag_name") or ""))
             if version is None or version[2] != expected_patch:
                 continue
+            if requires_bin_asset and not self.release_has_single_bin_asset(release):
+                continue
             candidates.append((version, release))
 
         if not candidates:
-            raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
+            requirement = " with exactly one .bin asset" if requires_bin_asset else ""
+            raise RuntimeError(f"no x.x.{expected_patch} release{requirement} found: {repo}")
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
+
+    def fetch_highest_release_with_bin_asset(
+        self,
+        catalog_item: dict[str, Any],
+        action: dict[str, Any],
+    ) -> dict[str, Any]:
+        repo = action.get("release_repo") or catalog_item.get("release_repo")
+        if not repo:
+            raise ValueError(f"release repo is not configured: {catalog_item['id']}")
+
+        url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
+        data = self._request_bytes(url, accept="application/vnd.github+json")
+        payload = json.loads(data.decode("utf-8"))
+        if not isinstance(payload, list):
+            raise RuntimeError(f"release list payload is invalid: {repo}")
+
+        candidates: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
+        for release in payload:
+            if not isinstance(release, dict):
+                continue
+            if release.get("draft") or release.get("prerelease"):
+                continue
+            version = release_version_tuple(str(release.get("tag_name") or ""))
+            if version is None or not self.release_has_single_bin_asset(release):
+                continue
+            candidates.append((version, release))
+
+        if not candidates:
+            raise RuntimeError(f"no release with exactly one .bin asset found: {repo}")
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return candidates[0][1]
+
+    def fetch_highest_release_with_bin_asset_from_github_web(
+        self,
+        repo: str,
+    ) -> dict[str, Any]:
+        text, _ = self._request_text(f"https://github.com/{repo}/releases")
+        tag_pattern = re.compile(
+            rf"/{re.escape(repo)}/releases/tag/([^\"?#<>]+)"
+        )
+        candidates: list[tuple[tuple[int, int, int], str]] = []
+        seen: set[str] = set()
+        for raw_tag in tag_pattern.findall(text):
+            tag = urllib.parse.unquote(html.unescape(raw_tag))
+            if tag in seen:
+                continue
+            seen.add(tag)
+            version = release_version_tuple(tag)
+            if version is None:
+                continue
+            candidates.append((version, tag))
+
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _, tag in candidates:
+            release = self.fetch_github_web_release(repo, tag)
+            if self.release_has_single_bin_asset(release):
+                return release
+
+        raise RuntimeError(f"no release with exactly one .bin asset found: {repo}")
 
     def fetch_latest_release_from_github_web(self, repo: str) -> dict[str, Any]:
         _, final_url = self._request_text(f"https://github.com/{repo}/releases/latest")
@@ -1394,6 +1544,7 @@ class OtaManager:
     def fetch_highest_patch_release_from_github_web(
         self,
         repo: str,
+        action: dict[str, Any],
         *,
         expected_patch: int,
     ) -> dict[str, Any]:
@@ -1416,7 +1567,12 @@ class OtaManager:
         if not candidates:
             raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
         candidates.sort(key=lambda item: item[0], reverse=True)
-        return self.fetch_github_web_release(repo, candidates[0][1])
+        requires_bin_asset = self._action_requires_single_bin_asset(action)
+        for _, tag in candidates:
+            release = self.fetch_github_web_release(repo, tag)
+            if not requires_bin_asset or self.release_has_single_bin_asset(release):
+                return release
+        raise RuntimeError(f"no x.x.{expected_patch} release with exactly one .bin asset found: {repo}")
 
     def fetch_github_web_release(self, repo: str, tag: str) -> dict[str, Any]:
         quoted_tag = urllib.parse.quote(tag, safe="")
@@ -1483,18 +1639,32 @@ class OtaManager:
         raise FileNotFoundError(f"release asset not found: {download_file}")
 
     @staticmethod
-    def release_bin_asset(release: dict[str, Any]) -> dict[str, Any]:
+    def _action_requires_single_bin_asset(action: dict[str, Any]) -> bool:
+        if "require_bin_asset" in action:
+            return bool(action.get("require_bin_asset"))
+        return str(action.get("type", "")) in FIRMWARE_BIN_ACTION_TYPES
+
+    @staticmethod
+    def _release_bin_assets(release: dict[str, Any]) -> list[dict[str, Any]]:
         assets = release.get("assets", [])
         if not isinstance(assets, list):
             assets = []
 
-        bin_assets = [
+        return [
             asset
             for asset in assets
             if isinstance(asset, dict)
             and asset.get("browser_download_url")
             and str(asset.get("name", "")).lower().endswith(".bin")
         ]
+
+    @classmethod
+    def release_has_single_bin_asset(cls, release: dict[str, Any]) -> bool:
+        return len(cls._release_bin_assets(release)) == 1
+
+    @classmethod
+    def release_bin_asset(cls, release: dict[str, Any]) -> dict[str, Any]:
+        bin_assets = cls._release_bin_assets(release)
         if len(bin_assets) != 1:
             names = ", ".join(str(asset.get("name")) for asset in bin_assets) or "none"
             raise FileNotFoundError(f"expected exactly one .bin release asset, found: {names}")

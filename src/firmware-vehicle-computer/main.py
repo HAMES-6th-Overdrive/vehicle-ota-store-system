@@ -274,7 +274,7 @@ STORE_CATALOG = [
                 "p2_timeout_seconds": 60,
                 "p2_star_timeout_seconds": 60,
                 "use_server_timing": False,
-                "release_patch_filter": 1,
+                "release_patch_filter": int(os.getenv("AEB_ZCU_OTA_RELEASE_PATCH_FILTER", "1")),
             },
         ],
     },
