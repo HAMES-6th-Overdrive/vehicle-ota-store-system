@@ -38,6 +38,42 @@
 #define ERASEWRAPPER_ADDR   (WRITEPAGE_ADDR     + WRITEPAGE_LEN)
 #define WRITEWRAPPER_ADDR   (ERASEWRAPPER_ADDR  + ERASEWRAPPER_LEN)
 
+#define OTA_PACKAGE_META_VERSION          1U
+#define OTA_PACKAGE_MAX_SEGMENTS          4U
+
+/*
+ * DFLASH layout at OTA_FLAG_ADDR
+ *
+ * +0x00: OTA_FLAG_MAGIC, OTA_PACKAGE_META_VERSION
+ * +0x08: virtualSize, 0
+ * +0x10: expectedCRC, 0
+ * +0x18: totalPayloadSize, segmentCount
+ * +0x20: gapFill, 0
+ * +0x28: seg0.offset, seg0.size
+ * +0x30: seg1.offset, seg1.size
+ * +0x38: seg2.offset, seg2.size
+ * +0x40: seg3.offset, seg3.size
+ */
+typedef struct
+{
+    uint32 offset;
+    uint32 size;
+} OTA_PackageSegment_t;
+
+typedef struct
+{
+    uint32 magic;
+    uint32 version;
+    uint32 virtualSize;
+    uint32 expectedCrc32;
+    uint32 totalPayloadSize;
+    uint32 gapFill;
+    uint32 segmentCount;
+    OTA_PackageSegment_t segments[OTA_PACKAGE_MAX_SEGMENTS];
+} OTA_PackageMetadata_t;
+
+boolean OTA_Flash_SetPackageMetadata(const OTA_PackageMetadata_t *meta);
+
 /* ── 함수 포인터 구조체 ──────────────────────────────────────── */
 typedef struct
 {

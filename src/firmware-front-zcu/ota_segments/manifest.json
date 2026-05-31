@@ -1,0 +1,46 @@
+﻿{
+    "format":  "OVD_SPARSE_OTA_MANIFEST_V1",
+    "sourceHex":  ".\\TriCore Debug (TASKING)\\firmware-front-zcu.hex",
+    "note":  "Generated from Intel HEX. 0xAxxxxxxx addresses are normalized to 0x8xxxxxxx. Only App range is included.",
+    "appBase":  "0x80020000",
+    "appEnd":  "0x80300000",
+    "virtualBase":  "0x80020000",
+    "virtualEnd":  "0x802FECC0",
+    "virtualSize":  3009728,
+    "virtualImageCrc32":  "0xB2ED5607",
+    "virtualGapFill":  "0x00",
+    "virtualUsedBytesFromHex":  175360,
+    "virtualFillBytes":  2834368,
+    "mergeGapBytes":  4096,
+    "alignBytes":  32,
+    "segmentCount":  2,
+    "totalPayloadSize":  175360,
+    "totalUsedBytesFromHex":  171098,
+    "totalFillBytes":  4262,
+    "segments":  [
+                     {
+                         "index":  1,
+                         "name":  "segment1",
+                         "address":  "0x80020000",
+                         "offsetFromAppBase":  "0x00000000",
+                         "endExclusive":  "0x8004A060",
+                         "size":  172128,
+                         "usedBytesFromHex":  171028,
+                         "fillBytes":  1100,
+                         "crc32":  "0x9DBCB037",
+                         "file":  ".\\ota_segments\\segment1.bin"
+                     },
+                     {
+                         "index":  2,
+                         "name":  "segment2",
+                         "address":  "0x802FE020",
+                         "offsetFromAppBase":  "0x002DE020",
+                         "endExclusive":  "0x802FECC0",
+                         "size":  3232,
+                         "usedBytesFromHex":  70,
+                         "fillBytes":  3162,
+                         "crc32":  "0x952A9243",
+                         "file":  ".\\ota_segments\\segment2.bin"
+                     }
+                 ]
+}

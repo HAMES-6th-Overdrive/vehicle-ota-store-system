@@ -217,3 +217,126 @@ void OTA_Flash_SetFlag(uint32 fwSize, uint32 expectedCRC)
     IfxScuWdt_setSafetyEndinit(pw);
     IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
 }
+
+static void OTA_DFlash_Write8(uint32 addr, uint32 wordL, uint32 wordU)
+{
+    uint16 pw = IfxScuWdt_getSafetyWatchdogPassword();
+
+    IfxFlash_enterPageMode(addr);
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+
+    IfxFlash_loadPage2X32(addr, wordL, wordU);
+
+    IfxScuWdt_clearSafetyEndinit(pw);
+    IfxFlash_writePage(addr);
+    IfxScuWdt_setSafetyEndinit(pw);
+
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+}
+
+boolean OTA_Flash_SetPackageMetadata(const OTA_PackageMetadata_t *meta)
+{
+    uint16 pw;
+    uint32 addr;
+    uint32 i;
+
+    if (meta == NULL_PTR)
+    {
+        return FALSE;
+    }
+
+    if (meta->magic != OTA_FLAG_MAGIC)
+    {
+        return FALSE;
+    }
+
+    if (meta->version != OTA_PACKAGE_META_VERSION)
+    {
+        return FALSE;
+    }
+
+    if ((meta->segmentCount == 0U) ||
+        (meta->segmentCount > OTA_PACKAGE_MAX_SEGMENTS))
+    {
+        return FALSE;
+    }
+
+    if ((meta->virtualSize == 0U) ||
+        (meta->expectedCrc32 == 0U))
+    {
+        return FALSE;
+    }
+
+    pw = IfxScuWdt_getSafetyWatchdogPassword();
+
+    IfxScuWdt_clearSafetyEndinit(pw);
+    IfxFlash_eraseMultipleSectors(OTA_FLAG_ADDR, 1U);
+    IfxScuWdt_setSafetyEndinit(pw);
+
+    IfxFlash_waitUnbusy(FLASH_MODULE, IfxFlash_FlashType_D0);
+
+    /*
+     * Bootloader OtaPendingMeta_t layout:
+     *
+     * +0x00 magic, version
+     * +0x08 virtualSize, gapFill
+     * +0x10 expectedCrc32, segmentCount
+     * +0x18 reserved0, reserved1
+     * +0x20 segment[0].offset, segment[0].size
+     * +0x28 segment[0].crc32, segment[0].reserved
+     * +0x30 segment[1].offset, segment[1].size
+     * +0x38 segment[1].crc32, segment[1].reserved
+     */
+
+    OTA_DFlash_Write8(OTA_FLAG_ADDR + 0x00U,
+                      OTA_FLAG_MAGIC,
+                      OTA_PACKAGE_META_VERSION);
+
+    OTA_DFlash_Write8(OTA_FLAG_ADDR + 0x08U,
+                      meta->virtualSize,
+                      meta->gapFill);
+
+    OTA_DFlash_Write8(OTA_FLAG_ADDR + 0x10U,
+                      meta->expectedCrc32,
+                      meta->segmentCount);
+
+    OTA_DFlash_Write8(OTA_FLAG_ADDR + 0x18U,
+                      0U,
+                      0U);
+
+    addr = OTA_FLAG_ADDR + 0x20U;
+
+    for (i = 0U; i < OTA_PACKAGE_MAX_SEGMENTS; i++)
+    {
+        uint32 segOffset = 0U;
+        uint32 segSize   = 0U;
+        uint32 segCrc    = 0U;
+
+        if (i < meta->segmentCount)
+        {
+            segOffset = meta->segments[i].offset;
+            segSize   = meta->segments[i].size;
+
+            /*
+             * App_Uds.c의 metadata 구조에 segment crc32가 아직 없으면
+             * 일단 0으로 저장해도 bootloader CRC 검증 자체에는 문제 없다.
+             * bootloader는 현재 전체 virtual CRC 기준으로 검증한다.
+             *
+             * 나중에 per-segment CRC도 쓰고 싶으면
+             * B4 manifest에 segment crc32까지 추가해서 채우면 된다.
+             */
+#if defined(OTA_PACKAGE_SEGMENT_HAS_CRC32)
+            segCrc = meta->segments[i].crc32;
+#else
+            segCrc = 0U;
+#endif
+        }
+
+        OTA_DFlash_Write8(addr + 0x00U, segOffset, segSize);
+        OTA_DFlash_Write8(addr + 0x08U, segCrc, 0U);
+
+        addr += 0x10U;
+    }
+
+    return TRUE;
+}
