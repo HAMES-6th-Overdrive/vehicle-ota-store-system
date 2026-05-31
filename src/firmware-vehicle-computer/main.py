@@ -103,7 +103,7 @@ FIRMWARE_VERSION_SERVICE_ID = int(
     os.getenv("FIRMWARE_VERSION_SERVICE_ID", str(DEFAULT_INFO_SERVICE_ID)), 0
 )
 VEHICLE_COMPUTER_VERSION_TARGET = "VehicleComputer"
-VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.5.1")
+VEHICLE_COMPUTER_FIRMWARE_VERSION = os.getenv("VEHICLE_COMPUTER_FIRMWARE_VERSION", "1.0.0")
 FEATURE_VERSION_TARGET = "Feature"
 
 # SOME/IP IDs for Drive Service / Drive method.
@@ -150,10 +150,33 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "doip_port": int(os.getenv("FRONT_ZCU_OTA_PORT", "13400")),
         "tester_address": int(os.getenv("FRONT_ZCU_TESTER_ADDRESS", "0x0E00"), 0),
         "ecu_address": int(os.getenv("FRONT_ZCU_ECU_ADDRESS", "0x0001"), 0),
+
+        # Sparse OTA package asset name. This is used when a zip package is uploaded manually.
+        "package_file": os.getenv(
+            "FRONT_ZCU_OTA_PACKAGE_FILE",
+            "firmware-front-zcu_ota_package.zip",
+        ),
+        "chunk_size": int(os.getenv("FRONT_ZCU_OTA_CHUNK_SIZE", "512")),
+        "progress_update_interval_blocks": int(
+            os.getenv("FRONT_ZCU_OTA_PROGRESS_INTERVAL_BLOCKS", "10")
+        ),
+
+        # Legacy compatibility for old continuous-bin flashing path.
         "bank_start": int(os.getenv("FRONT_ZCU_BANK_START", "0x80300000"), 0),
-        "timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60")),
-        "p2_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
-        "p2_star_timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_P2_STAR_TIMEOUT_SECONDS", os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "60"))),
+
+        "timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120")),
+        "p2_timeout_seconds": float(
+            os.getenv(
+                "FRONT_ZCU_UDS_P2_TIMEOUT_SECONDS",
+                os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120"),
+            )
+        ),
+        "p2_star_timeout_seconds": float(
+            os.getenv(
+                "FRONT_ZCU_UDS_P2_STAR_TIMEOUT_SECONDS",
+                os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120"),
+            )
+        ),
         "use_server_timing": os.getenv("FRONT_ZCU_UDS_USE_SERVER_TIMING", "0") == "1",
     },
     "sensor-ecu": {
@@ -166,11 +189,24 @@ FLASHER_BOARD_CONFIGS: dict[str, dict[str, Any]] = {
         "doip_port": int(os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401")),
         "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
         "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
-        "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
-        "block_size": int(
-            os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", str(SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE))
+
+        # Sparse OTA package asset name. This is used when a zip package is uploaded manually.
+        "package_file": os.getenv(
+            "AEB_SENSOR_ECU_OTA_PACKAGE_FILE",
+            "sensor-ecu_ota_package.zip",
         ),
-        "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
+        "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+        "ready_check_timeout_seconds": float(
+            os.getenv("AEB_SENSOR_ECU_OTA_READY_TIMEOUT_SECONDS", "120")
+        ),
+        "progress_update_interval_blocks": int(
+            os.getenv("AEB_SENSOR_ECU_OTA_PROGRESS_INTERVAL_BLOCKS", "50")
+        ),
+
+        # Legacy compatibility for old continuous-bin flashing path.
+        "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
+
+        "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "120")),
         "block_delay_seconds": float(os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0")),
         "activate_after_transfer": False,
     },
@@ -181,11 +217,19 @@ BOARD_VERSION_CONFIGS: dict[str, dict[str, Any]] = {
         "board_id": "front-zcu",
         "host": os.getenv("FRONT_ZCU_VERSION_HOST", "192.168.10.2"),
         "port": int(os.getenv("FRONT_ZCU_VERSION_PORT", str(FIRMWARE_VERSION_PORT))),
-        "service_id": int(os.getenv("GET_FRONT_ECU_VERSION_SERVICE_ID", str(DEFAULT_INFO_SERVICE_ID)), 0),
         "method_id": int(
             os.getenv("GET_FRONT_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_FRONT_ECU_VERSION_METHOD_ID)), 0
         ),
         "method_name": "GetFrontEcuVersion",
+    },
+    "MotorECU": {
+        "board_id": "drive-ecu",
+        "host": os.getenv("FRONT_ZCU_VERSION_HOST", "192.168.10.2"),
+        "port": int(os.getenv("FRONT_ZCU_VERSION_PORT", str(FIRMWARE_VERSION_PORT))),
+        "method_id": int(
+            os.getenv("GET_DRIVE_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_DRIVE_ECU_VERSION_METHOD_ID)), 0
+        ),
+        "method_name": "GetDriveEcuVersion",
     },
     "SensorECU": {
         "board_id": "sensor-ecu",
@@ -195,6 +239,15 @@ BOARD_VERSION_CONFIGS: dict[str, dict[str, Any]] = {
             os.getenv("GET_SENSOR_ECU_VERSION_METHOD_ID", str(DEFAULT_GET_SENSOR_ECU_VERSION_METHOD_ID)), 0
         ),
         "method_name": "GetSensorEcuVersion",
+    },
+    "AEB": {
+        "board_id": "aeb",
+        "host": os.getenv("FRONT_ZCU_VERSION_HOST", "192.168.10.2"),
+        "port": int(os.getenv("FRONT_ZCU_VERSION_PORT", str(FIRMWARE_VERSION_PORT))),
+        "method_id": int(
+            os.getenv("GET_AEB_VERSION_METHOD_ID", str(DEFAULT_GET_AEB_VERSION_METHOD_ID)), 0
+        ),
+        "method_name": "GetAebVersion",
     },
 }
 
@@ -210,7 +263,7 @@ STORE_CATALOG = [
         "full_name": "자동 긴급 제동",
         "description": "전방 위험 상황을 감지하면 긴급 제동을 보조하는 기능입니다.",
         "kind": "feature",
-        "latest_version": "1.0.0",
+        "latest_version": "2.0.0",
         "downloadable": True,
         "package_required": False,
         "download_file": "AEB.py",
@@ -221,43 +274,88 @@ STORE_CATALOG = [
                 "id": "sensor_ecu_firmware",
                 "type": "doip_sensor_can_ota",
                 "target": "sensor-ecu",
-                "release_repo": os.getenv("AEB_SENSOR_ECU_OTA_REPO", "HAMES-6th-Overdrive/sensor-ecu"),
+                "release_repo": os.getenv(
+                    "AEB_SENSOR_ECU_OTA_REPO",
+                    "HAMES-6th-Overdrive/sensor-ecu",
+                ),
                 "target_dir": "firmware",
+
+                # GitHub Release asset name.
+                # Version 판단은 release tag(v2.0.0)로 하고, 이 값은 asset 선택에만 사용한다.
+                "package_file": os.getenv(
+                    "AEB_SENSOR_ECU_OTA_PACKAGE_FILE",
+                    "sensor-ecu_ota_package.zip",
+                ),
+
                 "ecu_ip": os.getenv("AEB_SENSOR_ECU_OTA_ZCU_IP", "192.168.10.2"),
                 "doip_port": int(os.getenv("AEB_SENSOR_ECU_OTA_DOIP_PORT", "13401")),
                 "tester_address": int(os.getenv("AEB_SENSOR_ECU_OTA_TESTER_ADDRESS", "0x0E00"), 0),
                 "ecu_address": int(os.getenv("AEB_SENSOR_ECU_OTA_ZCU_ADDRESS", "0x0001"), 0),
+
+                # Legacy compatibility for old continuous-bin flashing path.
                 "app_addr": int(os.getenv("AEB_SENSOR_ECU_OTA_APP_ADDR", "0x80020000"), 0),
-                "block_size": int(
-                    os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", str(SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE))
+
+                # Sparse package over ZCU Sensor Gateway.
+                "block_size": int(os.getenv("AEB_SENSOR_ECU_OTA_BLOCK_SIZE", "32")),
+                "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "120")),
+                "ready_check_timeout_seconds": float(
+                    os.getenv("AEB_SENSOR_ECU_OTA_READY_TIMEOUT_SECONDS", "120")
                 ),
-                "timeout_seconds": float(os.getenv("AEB_SENSOR_ECU_OTA_TIMEOUT_SECONDS", "60")),
                 "block_delay_seconds": float(
                     os.getenv(
                         "AEB_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS",
                         os.getenv("MANUAL_SENSOR_ECU_OTA_BLOCK_DELAY_SECONDS", "0"),
                     )
                 ),
-                "progress_update_interval_blocks": 1,
+                "progress_update_interval_blocks": int(
+                    os.getenv("AEB_SENSOR_ECU_OTA_PROGRESS_INTERVAL_BLOCKS", "50")
+                ),
                 "activate_after_transfer": False,
-                "release_patch_filter": int(os.getenv("AEB_SENSOR_ECU_OTA_RELEASE_PATCH_FILTER", "0")),
             },
             {
                 "id": "zcu_firmware",
                 "type": "doip_uds_flash",
                 "target": "zcu",
-                "release_repo": "HAMES-6th-Overdrive/firmware-front-zcu",
+                "release_repo": os.getenv(
+                    "FRONT_ZCU_OTA_REPO",
+                    "HAMES-6th-Overdrive/firmware-front-zcu",
+                ),
                 "target_dir": "firmware",
-                "ecu_ip": "192.168.10.2",
-                "doip_port": 13400,
-                "tester_address": 3584,
-                "ecu_address": 1,
-                "bank_start": 0x80300000,
-                "timeout_seconds": 60,
-                "p2_timeout_seconds": 60,
-                "p2_star_timeout_seconds": 60,
+
+                # GitHub Release asset name.
+                # Version 판단은 release tag(v2.0.0)로 하고, 이 값은 asset 선택에만 사용한다.
+                "package_file": os.getenv(
+                    "FRONT_ZCU_OTA_PACKAGE_FILE",
+                    "firmware-front-zcu_ota_package.zip",
+                ),
+
+                "ecu_ip": os.getenv("FRONT_ZCU_OTA_IP", "192.168.10.2"),
+                "doip_port": int(os.getenv("FRONT_ZCU_OTA_PORT", "13400")),
+                "tester_address": int(os.getenv("FRONT_ZCU_TESTER_ADDRESS", "0x0E00"), 0),
+                "ecu_address": int(os.getenv("FRONT_ZCU_ECU_ADDRESS", "0x0001"), 0),
+
+                # Legacy compatibility for old continuous-bin flashing path.
+                "bank_start": int(os.getenv("FRONT_ZCU_BANK_START", "0x80300000"), 0),
+
+                # Sparse package over ZCU self DoIP.
+                "chunk_size": int(os.getenv("FRONT_ZCU_OTA_CHUNK_SIZE", "512")),
+                "timeout_seconds": float(os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120")),
+                "p2_timeout_seconds": float(
+                    os.getenv(
+                        "FRONT_ZCU_UDS_P2_TIMEOUT_SECONDS",
+                        os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120"),
+                    )
+                ),
+                "p2_star_timeout_seconds": float(
+                    os.getenv(
+                        "FRONT_ZCU_UDS_P2_STAR_TIMEOUT_SECONDS",
+                        os.getenv("FRONT_ZCU_UDS_TIMEOUT_SECONDS", "120"),
+                    )
+                ),
                 "use_server_timing": False,
-                "release_patch_filter": int(os.getenv("AEB_ZCU_OTA_RELEASE_PATCH_FILTER", "1")),
+                "progress_update_interval_blocks": int(
+                    os.getenv("FRONT_ZCU_OTA_PROGRESS_INTERVAL_BLOCKS", "10")
+                ),
             },
         ],
     },
@@ -304,6 +402,15 @@ STORE_CATALOG = [
                 "target_dir": "features",
             }
         ],
+    },
+    {
+        "id": "LUFFY_THEME",
+        "name": "테마(루피)",
+        "full_name": "루피 테마",
+        "description": "대시보드에 적용할 수 있는 루피 스타일 테마입니다.",
+        "kind": "theme",
+        "latest_version": "1.0.0",
+        "downloadable": False,
     },
 ]
 
@@ -844,6 +951,8 @@ class FeatureStateStore:
         ]
 
     def _is_record_installed(self, item: dict, record: dict) -> bool:
+        if item.get("kind") == "theme":
+            return bool(record["purchased"])
         if not item.get("downloadable"):
             return bool(record["purchased"])
         package_required = bool(item.get("package_required", True))
@@ -1340,45 +1449,6 @@ class FeatureStateStore:
             action["progress_start"] = int(index * 100 / firmware_count)
             action["progress_end"] = int((index + 1) * 100 / firmware_count)
             target_name = ota_target_display_name(action.get("target", "zcu"))
-            action_id = str(action.get("id", "firmware"))
-            existing_payload = payloads.get(action_id)
-            requested_asset = action.get("downloaded_asset_name")
-            existing_asset = existing_payload.get("asset_name") if isinstance(existing_payload, dict) else None
-            if (
-                isinstance(existing_payload, dict)
-                and existing_payload.get("applied")
-                and (requested_asset is None or str(requested_asset) == str(existing_asset))
-            ):
-                self.ota_manager.update_progress(
-                    feature_id,
-                    action_id=action_id,
-                    action_type=str(action.get("type", "firmware")),
-                    target=str(action.get("target", "firmware")),
-                    phase="complete",
-                    status="skipped",
-                    percent=int(action.get("progress_end", 100)),
-                    message=f"{target_name} OTA already applied; skipping",
-                    active=True,
-                )
-                with self._lock:
-                    data = self._load_unlocked()
-                    record = data["items"][feature_id]
-                    version_payload = {
-                        FEATURE_VERSION_TARGET: record.get("version"),
-                        **firmware_target_versions(record),
-                    }
-                results.append(
-                    {
-                        "feature_id": feature_id,
-                        "feature_name": item.get("name", feature_id),
-                        "ecu_target": target_name,
-                        "success": True,
-                        "version": version_payload,
-                        "error": None,
-                        "skipped": True,
-                    }
-                )
-                continue
             try:
                 zcu_result = self.ota_manager.flash_firmware_payload(item, action, force=True)
             except Exception as exc:
@@ -1505,10 +1575,6 @@ class FeatureStateStore:
             with self._lock:
                 data = self._load_unlocked()
                 record = data["items"][feature_id]
-                zcu = record["zcu_ota"]
-                zcu["applied"] = self._is_record_installed(item, record)
-                if zcu["applied"] and not zcu.get("applied_at"):
-                    zcu["applied_at"] = utc_now()
                 self._remove_feature_pending_unlocked(data, feature_id)
                 self._queue_reset_trigger_unlocked(data, item, record)
                 self._save_unlocked(data)
@@ -1732,9 +1798,6 @@ class FeatureStateStore:
         if firmware_failed:
             record["zcu_ota"]["applied"] = False
         elif run_flash and force and zcu_actions:
-            record["zcu_ota"]["applied"] = self._is_record_installed(item, record)
-            if record["zcu_ota"]["applied"] and not record["zcu_ota"].get("applied_at"):
-                record["zcu_ota"]["applied_at"] = utc_now()
             self.ota_manager.update_progress(
                 feature_id,
                 action_id="complete",
@@ -1958,7 +2021,7 @@ class VehicleStatus:
             }
 
     def set_theme(self, theme: str) -> dict:
-        if theme not in ("dark", "light", "blue"):
+        if theme not in ("dark", "light", "blue", "luffy"):
             raise ValueError(f"unsupported theme: {theme}")
         with self._lock:
             self._ui_theme = theme
@@ -2021,6 +2084,7 @@ class VehicleStatus:
                 "ui_theme": self._ui_theme,
                 "balance": 0,
                 "firmware_versions": {},
+                "available_themes": ["luffy"] if "LUFFY_THEME" in purchased else [],
             }
 
 
@@ -2031,9 +2095,10 @@ class FirmwareVersionStore:
         self._versions: dict[str, str] = {
             VEHICLE_COMPUTER_VERSION_TARGET: VEHICLE_COMPUTER_FIRMWARE_VERSION,
             "ZCU": "-",
-            "MotorECU": "1.0.0",
+            "MotorECU": "-",
             "SensorECU": "-",
-            "CameraECU": "1.0.0",
+            "CameraECU": "-",
+            "AEB": "-",
         }
         self._last_error: dict[str, str] = {}
         self._last_success_at: str | None = None
@@ -2058,7 +2123,6 @@ class FirmwareVersionStore:
                 "service_id": FIRMWARE_VERSION_SERVICE_ID,
                 "methods": {
                     board_name: {
-                        "service_id": config.get("service_id", FIRMWARE_VERSION_SERVICE_ID),
                         "method_id": config["method_id"],
                         "method_name": config["method_name"],
                     }
@@ -2119,11 +2183,10 @@ class FirmwareVersionStore:
             self._session_id = (self._session_id + 1) & 0xFFFF
             session_id = self._session_id or 1
 
-        service_id = int(config.get("service_id", FIRMWARE_VERSION_SERVICE_ID))
         method_id = int(config["method_id"])
         packet = build_someip_packet(
             b"",
-            service_id=service_id,
+            service_id=FIRMWARE_VERSION_SERVICE_ID,
             method_id=method_id,
             client_id=DRIVE_CLIENT_ID,
             session_id=session_id,
@@ -2154,7 +2217,7 @@ class FirmwareVersionStore:
         message = parse_someip_packet(raw)
         if message is None:
             raise RuntimeError("invalid SOME/IP response")
-        if message.service_id != service_id:
+        if message.service_id != FIRMWARE_VERSION_SERVICE_ID:
             raise RuntimeError(f"unexpected service id: 0x{message.service_id:04x}")
         if message.method_id != method_id:
             raise RuntimeError(f"unexpected method id: 0x{message.method_id:04x}")
@@ -2574,7 +2637,7 @@ def api_server_worker(
             import uvicorn
             from ethernet import parse_payload, send_ethernet_message
             from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-            from fastapi.responses import FileResponse
+            from fastapi.responses import FileResponse, Response
             from fastapi.staticfiles import StaticFiles
             from pydantic import BaseModel, Field
             from starlette.concurrency import run_in_threadpool
@@ -2605,7 +2668,7 @@ def api_server_worker(
             feature_id: str
 
         class ThemeRequest(BaseModel):
-            theme: Literal["dark", "light", "blue"]
+            theme: Literal["dark", "light", "blue", "luffy"]
 
         class OtaDecisionRequest(BaseModel):
             do_update: bool
@@ -3018,10 +3081,7 @@ def api_server_worker(
 
         def store_item_version_payload(item: dict, record: dict, installed: bool) -> dict:
             package_required = bool(item.get("package_required", True))
-            firmware_only = bool(item.get("downloadable") and not package_required)
-            package_downloaded = bool(record.get("package", {}).get("downloaded")) or (
-                firmware_only and installed
-            )
+            package_downloaded = bool(record.get("package", {}).get("downloaded"))
             package_path = store_feature_package_path(record)
             package_version = python_module_version(package_path)
             firmware_versions = firmware_target_versions(record)
@@ -3068,8 +3128,6 @@ def api_server_worker(
             for item in STORE_CATALOG:
                 record = records[item["id"]]
                 installed = feature_state_store._is_record_installed(item, record)
-                firmware_only = bool(item.get("downloadable") and not item.get("package_required", True))
-                downloaded = bool(record["package"]["downloaded"]) or (firmware_only and installed)
                 version_payload = store_item_version_payload(item, record, installed)
                 items.append(
                     {
@@ -3077,7 +3135,7 @@ def api_server_worker(
                         **version_payload,
                         "purchased": record["purchased"],
                         "enabled": record["enabled"],
-                        "downloaded": downloaded,
+                        "downloaded": record["package"]["downloaded"],
                         "applied": installed,
                         "runtime_error": record["zcu_ota"].get("error") or record["package"]["error"],
                         "ota_progress": ota_manager.progress_for(item["id"]),
@@ -3108,8 +3166,14 @@ def api_server_worker(
             payload["aeb_triggered_at"] = aeb_alert["triggered_at"]
             payload["aeb_trigger_count"] = aeb_alert["count"]
             board_versions = firmware_versions.snapshot()
+            aeb_zcu = feature_state_store.feature_record("AEB")["zcu_ota"]
+            if aeb_zcu.get("applied") and aeb_zcu.get("version"):
+                board_versions["ZCU"] = firmware_version(aeb_zcu["version"]) or board_versions.get("ZCU", "-")
             payload["firmware_versions"] = board_versions
             payload["pending_ota"] = feature_state_store.pending_ota()
+            payload["available_themes"] = (
+                ["luffy"] if feature_state_store.feature_record("LUFFY_THEME")["purchased"] else []
+            )
             internet = internet_status.snapshot()
             vehicle_link = vehicle_computer_connection_payload()
             payload["network"] = {
@@ -3229,6 +3293,19 @@ def api_server_worker(
                 raise HTTPException(status_code=404, detail="dashboard store.html not found")
             return FileResponse(dashboard_store, headers=no_store_headers())
 
+        @app.get("/themes/{theme_id}.css", include_in_schema=False)
+        async def theme_css(theme_id: str) -> Response:
+            if theme_id != "luffy":
+                raise HTTPException(status_code=404, detail="theme css not found")
+            css = """
+[data-theme="luffy"] .luffy-deco{display:block}
+[data-theme="luffy"] .storebtn,
+[data-theme="luffy"] .ota-banner-btn,
+[data-theme="luffy"] .bpri,
+[data-theme="luffy"] .lactbtn{background:linear-gradient(135deg,#c87de8,#ff8bc8);color:#4a2060}
+"""
+            return Response(content=css.strip(), media_type="text/css")
+
         @app.get("/api/health")
         async def health() -> dict:
             heartbeat()
@@ -3343,8 +3420,8 @@ def api_server_worker(
                     detail=f"{board['name']} flashing is not implemented",
                 )
             filename = safe_filename(body.filename)
-            if not filename.lower().endswith(".bin"):
-                raise HTTPException(status_code=400, detail="binary file must have .bin extension")
+            if not filename.lower().endswith((".bin", ".zip")):
+                raise HTTPException(status_code=400, detail="firmware file must have .bin or .zip extension")
             try:
                 firmware = base64.b64decode(body.content_base64, validate=True)
             except (binascii.Error, ValueError) as exc:
@@ -3368,6 +3445,9 @@ def api_server_worker(
                     "tester_address": board["tester_address"],
                     "ecu_address": board["ecu_address"],
                     "bank_start": board["bank_start"],
+                    "package_file": board.get("package_file"),
+                    "chunk_size": board.get("chunk_size", 512),
+                    "progress_update_interval_blocks": board.get("progress_update_interval_blocks", 10),
                     "timeout_seconds": board["timeout_seconds"],
                     "p2_timeout_seconds": board["p2_timeout_seconds"],
                     "p2_star_timeout_seconds": board["p2_star_timeout_seconds"],
@@ -3384,10 +3464,12 @@ def api_server_worker(
                     "tester_address": board["tester_address"],
                     "ecu_address": board["ecu_address"],
                     "app_addr": board["app_addr"],
+                    "package_file": board.get("package_file"),
                     "block_size": board["block_size"],
+                    "ready_check_timeout_seconds": board.get("ready_check_timeout_seconds", 120),
                     "timeout_seconds": board["timeout_seconds"],
                     "block_delay_seconds": board["block_delay_seconds"],
-                    "progress_update_interval_blocks": 1,
+                    "progress_update_interval_blocks": board.get("progress_update_interval_blocks", 50),
                     "activate_after_transfer": board["activate_after_transfer"],
                 }
                 flash_message = f"{board['name']} CAN OTA via ZCU"
@@ -3546,9 +3628,17 @@ def api_server_worker(
             heartbeat()
             return await run_in_threadpool(fetch_weather)
 
+        @app.get("/api/theme-available/{theme_id}")
+        async def theme_available(theme_id: str) -> dict:
+            heartbeat()
+            available = theme_id != "luffy" or feature_state_store.feature_record("LUFFY_THEME")["purchased"]
+            return {"theme": theme_id, "available": available}
+
         @app.post("/api/theme")
         async def set_theme(body: ThemeRequest) -> dict:
             heartbeat()
+            if body.theme == "luffy" and not feature_state_store.feature_record("LUFFY_THEME")["purchased"]:
+                raise HTTPException(status_code=400, detail="luffy theme is not purchased")
             return {"success": True, "vehicle_status": vehicle_status.set_theme(body.theme)}
 
         @app.post("/api/ota/check")
@@ -3620,6 +3710,21 @@ def api_server_worker(
                 "accepted": True,
                 "result": result,
                 "pending_ota": feature_state_store.pending_ota(),
+            }
+
+        @app.post("/api/demo/reveal-luffy")
+        async def demo_reveal_luffy() -> dict:
+            heartbeat()
+            return {
+                "success": True,
+                "items": [
+                    {
+                        "id": "LUFFY_THEME",
+                        "icon": "THEME",
+                        "name": "테마(루피)",
+                        "desc": "루피 테마가 스토어에 표시됩니다.",
+                    }
+                ],
             }
 
         @app.post("/api/demo/fvsa-buzzer")
@@ -3819,9 +3924,7 @@ def api_server_worker(
             control = vehicle_control.set_feature_enabled(feature_id, enabled)
             effective = feature_state_store.is_feature_enabled(feature_id)
             feature_state = control[feature_id.lower()]
-            if enabled and feature_id == "AEB" and not effective:
-                message = "AEB firmware OTA가 완료되지 않아 활성화할 수 없습니다."
-            elif enabled and (not feature_state["downloaded"] or not feature_state["applied"]):
+            if enabled and (not feature_state["downloaded"] or not feature_state["applied"]):
                 message = f"{feature_id} 파일이 다운로드/적용되지 않아 기본 조종으로 유지됩니다."
             else:
                 message = f"{feature_id} {'enabled' if effective else 'disabled'}"

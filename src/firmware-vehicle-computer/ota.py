@@ -13,6 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zlib
+import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,12 +25,9 @@ SENSOR_GATEWAY_PT_ROUTING_ACT_REQ = 0x0005
 SENSOR_GATEWAY_PT_ROUTING_ACT_RES = 0x0006
 SENSOR_GATEWAY_PT_DIAG_MESSAGE = 0x8001
 SENSOR_GATEWAY_PT_DIAG_ACK = 0x8002
-SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE = 0x7F
-SENSOR_GATEWAY_UDS_NRC_RESPONSE_PENDING = 0x78
 SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD = 64
 SENSOR_CAN_OTA_TRANSFER_OVERHEAD = 2
 SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE = SENSOR_CAN_OTA_MAX_FRAME_PAYLOAD - SENSOR_CAN_OTA_TRANSFER_OVERHEAD
-FIRMWARE_BIN_ACTION_TYPES = {"doip_uds_flash", "doip_sensor_can_ota"}
 
 
 class SensorGatewayDoipError(RuntimeError):
@@ -57,6 +55,32 @@ class OtaPackageResult:
     downloaded_at: str | None
     checked_at: str | None
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class SparseOtaSegment:
+    index: int
+    name: str
+    offset: int
+    size: int
+    crc32: int | None
+    path: Path
+    data: bytes
+
+
+@dataclass(frozen=True)
+class SparseOtaPackage:
+    manifest_path: Path
+    package_dir: Path
+    virtual_size: int
+    virtual_crc32: int
+    gap_fill: int
+    total_payload_size: int
+    segments: tuple[SparseOtaSegment, ...]
+
+    @property
+    def payload(self) -> bytes:
+        return b"".join(segment.data for segment in self.segments)
 
 
 class OtaAction:
@@ -314,6 +338,7 @@ class DoipUdsFlashAction(OtaAction):
         checked_at = utc_now()
         percent_start, percent_end = action_progress_span(action)
         percent_flash_start = percent_start + int((percent_end - percent_start) * 0.4)
+
         manager.update_progress(
             feature_id,
             action_id=action_id,
@@ -322,7 +347,7 @@ class DoipUdsFlashAction(OtaAction):
             phase="checking",
             status="checking",
             percent=percent_start,
-            message="ZCU 펌웨어 릴리즈 확인 중",
+            message="ZCU OTA 패키지 릴리즈 확인 중",
             active=True,
         )
 
@@ -330,14 +355,14 @@ class DoipUdsFlashAction(OtaAction):
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
         release_url = release.get("html_url")
-        release_asset = manager.release_bin_asset(release)
+        release_asset = manager.release_ota_package_asset(release, action)
         download_file = str(release_asset["name"])
-        bin_path = manager.resolve_target_path(
+        package_path = manager.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
             download_file,
         )
 
-        if not force and bin_path.exists() and clean_firmware_version(current_version) == version:
+        if not force and package_path.exists() and clean_firmware_version(current_version) == version:
             manager.update_progress(
                 feature_id,
                 action_id=action_id,
@@ -346,7 +371,7 @@ class DoipUdsFlashAction(OtaAction):
                 phase="complete",
                 status="current",
                 percent=percent_end,
-                message="ZCU 펌웨어가 최신 버전입니다",
+                message="ZCU OTA 패키지가 최신 버전입니다",
                 active=False,
             )
             return OtaPackageResult(
@@ -357,7 +382,7 @@ class DoipUdsFlashAction(OtaAction):
                 downloaded=True,
                 applied=True,
                 updated=False,
-                path=bin_path,
+                path=package_path,
                 version=version,
                 release_tag=release_tag,
                 release_url=str(release_url) if release_url else None,
@@ -374,26 +399,27 @@ class DoipUdsFlashAction(OtaAction):
             phase="download",
             status="downloading",
             percent=percent_start,
-            message="ZCU 펌웨어 다운로드 중",
+            message="ZCU OTA 패키지 다운로드 중",
             active=True,
         )
-        firmware_bytes = manager._request_bytes(
+
+        package_bytes = manager._request_bytes(
             str(release_asset["browser_download_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
                 "action_type": self.action_type,
                 "target": target_name,
-                "message": "ZCU 펌웨어 다운로드 중",
+                "message": "ZCU OTA 패키지 다운로드 중",
                 "percent_start": percent_start,
                 "percent_end": percent_flash_start,
             },
         )
-        asset_name = download_file
-        bin_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
-        temp_target.write_bytes(firmware_bytes)
-        temp_target.replace(bin_path)
+
+        package_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = package_path.with_suffix(package_path.suffix + ".tmp")
+        temp_target.write_bytes(package_bytes)
+        temp_target.replace(package_path)
 
         manager.update_progress(
             feature_id,
@@ -403,13 +429,14 @@ class DoipUdsFlashAction(OtaAction):
             phase="install",
             status="flashing",
             percent=percent_flash_start,
-            message="ZCU 펌웨어 플래싱 중",
+            message="ZCU sparse OTA 전송 중",
             active=True,
-            bytes_downloaded=len(firmware_bytes),
-            total_bytes=len(firmware_bytes),
+            bytes_downloaded=len(package_bytes),
+            total_bytes=len(package_bytes),
         )
-        success = manager.flash_bin_via_doip(
-            bin_path,
+
+        success = manager.flash_sparse_package_via_doip(
+            package_path,
             feature_id,
             action,
             progress={
@@ -417,11 +444,12 @@ class DoipUdsFlashAction(OtaAction):
                 "action_id": action_id,
                 "action_type": self.action_type,
                 "target": target_name,
-                "message": "ZCU 펌웨어 플래싱 중",
+                "message": "ZCU sparse OTA 전송 중",
                 "percent_start": percent_flash_start,
                 "percent_end": percent_end,
             },
         )
+
         manager.update_progress(
             feature_id,
             action_id=action_id,
@@ -430,11 +458,12 @@ class DoipUdsFlashAction(OtaAction):
             phase="complete" if success else "error",
             status="complete" if success else "failed",
             percent=percent_end if success else None,
-            message="ZCU 펌웨어 플래싱 완료" if success else "ZCU 펌웨어 플래싱 실패",
+            message="ZCU sparse OTA 전송 완료" if success else "ZCU sparse OTA 전송 실패",
             active=False,
-            bytes_downloaded=len(firmware_bytes),
-            total_bytes=len(firmware_bytes),
+            bytes_downloaded=len(package_bytes),
+            total_bytes=len(package_bytes),
         )
+
         return OtaPackageResult(
             feature_id=feature_id,
             action_id=action_id,
@@ -443,14 +472,14 @@ class DoipUdsFlashAction(OtaAction):
             downloaded=True,
             applied=success,
             updated=True,
-            path=bin_path,
+            path=package_path,
             version=version,
             release_tag=release_tag,
             release_url=str(release_url) if release_url else None,
-            asset_name=asset_name,
+            asset_name=download_file,
             downloaded_at=checked_at,
             checked_at=checked_at,
-            error=None if success else "DoIP/UDS flashing failed",
+            error=None if success else "ZCU sparse OTA failed",
         )
 
 
@@ -472,6 +501,7 @@ class DoipSensorCanOtaAction(OtaAction):
         checked_at = utc_now()
         percent_start, percent_end = action_progress_span(action)
         percent_transfer_start = percent_start + int((percent_end - percent_start) * 0.25)
+
         manager.update_progress(
             feature_id,
             action_id=action_id,
@@ -480,7 +510,7 @@ class DoipSensorCanOtaAction(OtaAction):
             phase="checking",
             status="checking",
             percent=percent_start,
-            message="Sensor ECU OTA 릴리즈 확인 중",
+            message="Sensor ECU OTA 패키지 릴리즈 확인 중",
             active=True,
         )
 
@@ -488,14 +518,14 @@ class DoipSensorCanOtaAction(OtaAction):
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
         release_url = release.get("html_url")
-        release_asset = manager.release_bin_asset(release)
+        release_asset = manager.release_ota_package_asset(release, action)
         download_file = str(release_asset["name"])
-        bin_path = manager.resolve_target_path(
+        package_path = manager.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
             download_file,
         )
 
-        if not force and bin_path.exists() and clean_firmware_version(current_version) == version:
+        if not force and package_path.exists() and clean_firmware_version(current_version) == version:
             manager.update_progress(
                 feature_id,
                 action_id=action_id,
@@ -504,7 +534,7 @@ class DoipSensorCanOtaAction(OtaAction):
                 phase="complete",
                 status="current",
                 percent=percent_end,
-                message="Sensor ECU OTA가 최신 버전입니다",
+                message="Sensor ECU OTA 패키지가 최신 버전입니다",
                 active=False,
             )
             return OtaPackageResult(
@@ -515,7 +545,7 @@ class DoipSensorCanOtaAction(OtaAction):
                 downloaded=True,
                 applied=True,
                 updated=False,
-                path=bin_path,
+                path=package_path,
                 version=version,
                 release_tag=release_tag,
                 release_url=str(release_url) if release_url else None,
@@ -532,26 +562,27 @@ class DoipSensorCanOtaAction(OtaAction):
             phase="download",
             status="downloading",
             percent=percent_start,
-            message="Sensor ECU 펌웨어 다운로드 중",
+            message="Sensor ECU OTA 패키지 다운로드 중",
             active=True,
         )
-        firmware_bytes = manager._request_bytes(
+
+        package_bytes = manager._request_bytes(
             str(release_asset["browser_download_url"]),
             progress={
                 "feature_id": feature_id,
                 "action_id": action_id,
                 "action_type": self.action_type,
                 "target": target_name,
-                "message": "Sensor ECU 펌웨어 다운로드 중",
+                "message": "Sensor ECU OTA 패키지 다운로드 중",
                 "percent_start": percent_start,
                 "percent_end": percent_transfer_start,
             },
         )
-        asset_name = download_file
-        bin_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_target = bin_path.with_suffix(bin_path.suffix + ".tmp")
-        temp_target.write_bytes(firmware_bytes)
-        temp_target.replace(bin_path)
+
+        package_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_target = package_path.with_suffix(package_path.suffix + ".tmp")
+        temp_target.write_bytes(package_bytes)
+        temp_target.replace(package_path)
 
         manager.update_progress(
             feature_id,
@@ -561,13 +592,14 @@ class DoipSensorCanOtaAction(OtaAction):
             phase="install",
             status="flashing",
             percent=percent_transfer_start,
-            message="ZCU 경유 Sensor ECU CAN OTA 중",
+            message="ZCU 경유 Sensor ECU sparse OTA 중",
             active=True,
-            bytes_downloaded=len(firmware_bytes),
-            total_bytes=len(firmware_bytes),
+            bytes_downloaded=len(package_bytes),
+            total_bytes=len(package_bytes),
         )
-        success = manager.flash_sensor_can_ota_via_doip(
-            bin_path,
+
+        success = manager.flash_sensor_sparse_package_via_doip(
+            package_path,
             feature_id,
             action,
             progress={
@@ -575,11 +607,12 @@ class DoipSensorCanOtaAction(OtaAction):
                 "action_id": action_id,
                 "action_type": self.action_type,
                 "target": target_name,
-                "message": "ZCU 경유 Sensor ECU CAN OTA 중",
+                "message": "ZCU 경유 Sensor ECU sparse OTA 중",
                 "percent_start": percent_transfer_start,
                 "percent_end": percent_end,
             },
         )
+
         manager.update_progress(
             feature_id,
             action_id=action_id,
@@ -588,11 +621,12 @@ class DoipSensorCanOtaAction(OtaAction):
             phase="complete" if success else "error",
             status="complete" if success else "failed",
             percent=percent_end if success else None,
-            message="Sensor ECU CAN OTA 완료" if success else "Sensor ECU CAN OTA 실패",
+            message="Sensor ECU sparse OTA 완료" if success else "Sensor ECU sparse OTA 실패",
             active=False,
-            bytes_downloaded=len(firmware_bytes),
-            total_bytes=len(firmware_bytes),
+            bytes_downloaded=len(package_bytes),
+            total_bytes=len(package_bytes),
         )
+
         return OtaPackageResult(
             feature_id=feature_id,
             action_id=action_id,
@@ -601,14 +635,14 @@ class DoipSensorCanOtaAction(OtaAction):
             downloaded=True,
             applied=success,
             updated=True,
-            path=bin_path,
+            path=package_path,
             version=version,
             release_tag=release_tag,
             release_url=str(release_url) if release_url else None,
-            asset_name=asset_name,
+            asset_name=download_file,
             downloaded_at=checked_at,
             checked_at=checked_at,
-            error=None if success else "Sensor ECU CAN OTA failed",
+            error=None if success else "Sensor ECU sparse OTA failed",
         )
 
 
@@ -674,10 +708,6 @@ class OtaManager:
         self._flash_state_depth = 0
         self._progress_lock = threading.Lock()
         self._progress: dict[str, dict[str, Any]] = {}
-        self.release_cache_seconds = float(os.getenv("VEHICLE_OTA_RELEASE_CACHE_SECONDS", "300"))
-        self.release_error_cache_seconds = float(os.getenv("VEHICLE_OTA_RELEASE_ERROR_CACHE_SECONDS", "60"))
-        self._release_cache_lock = threading.Lock()
-        self._release_cache: dict[str, dict[str, Any]] = {}
         self._actions: dict[str, OtaAction] = {
             LocalFileAction.action_type: LocalFileAction(),
             GithubReleaseFileAction.action_type: GithubReleaseFileAction(),
@@ -786,7 +816,13 @@ class OtaManager:
         release = self.fetch_latest_release(catalog_item, action)
         release_tag = str(release.get("tag_name") or "")
         version = clean_firmware_version(release_tag) or str(catalog_item.get("latest_version", "1.0.0"))
-        release_asset = self.release_bin_asset(release)
+        if str(action.get("type", "")) in (
+            DoipUdsFlashAction.action_type,
+            DoipSensorCanOtaAction.action_type,
+        ):
+            release_asset = self.release_ota_package_asset(release, action)
+        else:
+            release_asset = self.release_bin_asset(release)
         download_file = str(release_asset["name"])
         bin_path = self.resolve_target_path(
             {**action, "target_dir": str(action.get("target_dir", "firmware"))},
@@ -1027,19 +1063,35 @@ class OtaManager:
         )
 
         if action_type == DoipSensorCanOtaAction.action_type:
-            success = self.flash_sensor_can_ota_via_doip(
-                bin_path,
-                feature_id,
-                action,
-                progress=flash_progress,
-            )
+            if self.is_sparse_package_path(bin_path):
+                success = self.flash_sensor_sparse_package_via_doip(
+                    bin_path,
+                    feature_id,
+                    action,
+                    progress=flash_progress,
+                )
+            else:
+                success = self.flash_sensor_can_ota_via_doip(
+                    bin_path,
+                    feature_id,
+                    action,
+                    progress=flash_progress,
+                )
         elif action_type == DoipUdsFlashAction.action_type:
-            success = self.flash_bin_via_doip(
-                bin_path,
-                feature_id,
-                action,
-                progress=flash_progress,
-            )
+            if self.is_sparse_package_path(bin_path):
+                success = self.flash_sparse_package_via_doip(
+                    bin_path,
+                    feature_id,
+                    action,
+                    progress=flash_progress,
+                )
+            else:
+                success = self.flash_bin_via_doip(
+                    bin_path,
+                    feature_id,
+                    action,
+                    progress=flash_progress,
+                )
         else:
             raise ValueError(f"unsupported firmware flash action type: {action_type}")
 
@@ -1323,84 +1375,11 @@ class OtaManager:
             return source
         return self.base_dir / source
 
-    def _release_cache_key(self, repo: str, action: dict[str, Any]) -> str:
-        patch_filter = action.get("release_patch_filter")
-        version_selector = f"patch:{int(patch_filter)}" if patch_filter is not None else "latest"
-        bin_selector = "bin:1" if self._action_requires_single_bin_asset(action) else "bin:0"
-        return "|".join((repo, version_selector, bin_selector))
-
-    @staticmethod
-    def _clone_release(release: dict[str, Any]) -> dict[str, Any]:
-        cloned = dict(release)
-        assets = release.get("assets")
-        if isinstance(assets, list):
-            cloned["assets"] = [dict(asset) for asset in assets if isinstance(asset, dict)]
-        return cloned
-
-    def _cached_release(self, cache_key: str) -> dict[str, Any] | None:
-        now = time.time()
-        with self._release_cache_lock:
-            entry = self._release_cache.get(cache_key)
-            if not entry:
-                return None
-            cached_at = float(entry.get("cached_at", 0))
-            ttl_seconds = float(entry.get("ttl_seconds", 0))
-            if ttl_seconds <= 0 or now - cached_at >= ttl_seconds:
-                self._release_cache.pop(cache_key, None)
-                return None
-            if entry.get("error"):
-                raise RuntimeError(str(entry["error"]))
-            release = entry.get("release")
-            if not isinstance(release, dict):
-                self._release_cache.pop(cache_key, None)
-                return None
-            return self._clone_release(release)
-
-    def _cache_release(self, cache_key: str, release: dict[str, Any]) -> None:
-        if self.release_cache_seconds <= 0:
-            return
-        with self._release_cache_lock:
-            self._release_cache[cache_key] = {
-                "cached_at": time.time(),
-                "ttl_seconds": self.release_cache_seconds,
-                "release": self._clone_release(release),
-            }
-
-    def _cache_release_error(self, cache_key: str, exc: RuntimeError) -> None:
-        if self.release_error_cache_seconds <= 0:
-            return
-        with self._release_cache_lock:
-            self._release_cache[cache_key] = {
-                "cached_at": time.time(),
-                "ttl_seconds": self.release_error_cache_seconds,
-                "error": str(exc),
-            }
-
     def fetch_latest_release(self, catalog_item: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
         repo = action.get("release_repo") or catalog_item.get("release_repo")
         if not repo:
             raise ValueError(f"release repo is not configured: {catalog_item['id']}")
 
-        cache_key = self._release_cache_key(str(repo), action)
-        cached_release = self._cached_release(cache_key)
-        if cached_release is not None:
-            return cached_release
-
-        try:
-            release = self._fetch_latest_release_uncached(catalog_item, action, str(repo))
-        except RuntimeError as exc:
-            self._cache_release_error(cache_key, exc)
-            raise
-
-        self._cache_release(cache_key, release)
-        return release
-
-    def _fetch_latest_release_uncached(
-        self,
-        catalog_item: dict[str, Any],
-        action: dict[str, Any],
-        repo: str,
-    ) -> dict[str, Any]:
         if action.get("release_patch_filter") is not None:
             expected_patch = int(action["release_patch_filter"])
             try:
@@ -1414,17 +1393,8 @@ class OtaManager:
                     raise
                 return self.fetch_highest_patch_release_from_github_web(
                     repo,
-                    action,
                     expected_patch=expected_patch,
                 )
-
-        if self._action_requires_single_bin_asset(action):
-            try:
-                return self.fetch_highest_release_with_bin_asset(catalog_item, action)
-            except RuntimeError as exc:
-                if "download failed (403)" not in str(exc):
-                    raise
-                return self.fetch_highest_release_with_bin_asset_from_github_web(repo)
 
         url = f"https://api.github.com/repos/{repo}/releases/latest"
         try:
@@ -1455,7 +1425,6 @@ class OtaManager:
         if not isinstance(payload, list):
             raise RuntimeError(f"release list payload is invalid: {repo}")
 
-        requires_bin_asset = self._action_requires_single_bin_asset(action)
         candidates: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
         for release in payload:
             if not isinstance(release, dict):
@@ -1465,74 +1434,12 @@ class OtaManager:
             version = release_version_tuple(str(release.get("tag_name") or ""))
             if version is None or version[2] != expected_patch:
                 continue
-            if requires_bin_asset and not self.release_has_single_bin_asset(release):
-                continue
             candidates.append((version, release))
 
         if not candidates:
-            requirement = " with exactly one .bin asset" if requires_bin_asset else ""
-            raise RuntimeError(f"no x.x.{expected_patch} release{requirement} found: {repo}")
+            raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
         candidates.sort(key=lambda item: item[0], reverse=True)
         return candidates[0][1]
-
-    def fetch_highest_release_with_bin_asset(
-        self,
-        catalog_item: dict[str, Any],
-        action: dict[str, Any],
-    ) -> dict[str, Any]:
-        repo = action.get("release_repo") or catalog_item.get("release_repo")
-        if not repo:
-            raise ValueError(f"release repo is not configured: {catalog_item['id']}")
-
-        url = f"https://api.github.com/repos/{repo}/releases?per_page=100"
-        data = self._request_bytes(url, accept="application/vnd.github+json")
-        payload = json.loads(data.decode("utf-8"))
-        if not isinstance(payload, list):
-            raise RuntimeError(f"release list payload is invalid: {repo}")
-
-        candidates: list[tuple[tuple[int, int, int], dict[str, Any]]] = []
-        for release in payload:
-            if not isinstance(release, dict):
-                continue
-            if release.get("draft") or release.get("prerelease"):
-                continue
-            version = release_version_tuple(str(release.get("tag_name") or ""))
-            if version is None or not self.release_has_single_bin_asset(release):
-                continue
-            candidates.append((version, release))
-
-        if not candidates:
-            raise RuntimeError(f"no release with exactly one .bin asset found: {repo}")
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        return candidates[0][1]
-
-    def fetch_highest_release_with_bin_asset_from_github_web(
-        self,
-        repo: str,
-    ) -> dict[str, Any]:
-        text, _ = self._request_text(f"https://github.com/{repo}/releases")
-        tag_pattern = re.compile(
-            rf"/{re.escape(repo)}/releases/tag/([^\"?#<>]+)"
-        )
-        candidates: list[tuple[tuple[int, int, int], str]] = []
-        seen: set[str] = set()
-        for raw_tag in tag_pattern.findall(text):
-            tag = urllib.parse.unquote(html.unescape(raw_tag))
-            if tag in seen:
-                continue
-            seen.add(tag)
-            version = release_version_tuple(tag)
-            if version is None:
-                continue
-            candidates.append((version, tag))
-
-        candidates.sort(key=lambda item: item[0], reverse=True)
-        for _, tag in candidates:
-            release = self.fetch_github_web_release(repo, tag)
-            if self.release_has_single_bin_asset(release):
-                return release
-
-        raise RuntimeError(f"no release with exactly one .bin asset found: {repo}")
 
     def fetch_latest_release_from_github_web(self, repo: str) -> dict[str, Any]:
         _, final_url = self._request_text(f"https://github.com/{repo}/releases/latest")
@@ -1544,7 +1451,6 @@ class OtaManager:
     def fetch_highest_patch_release_from_github_web(
         self,
         repo: str,
-        action: dict[str, Any],
         *,
         expected_patch: int,
     ) -> dict[str, Any]:
@@ -1567,12 +1473,7 @@ class OtaManager:
         if not candidates:
             raise RuntimeError(f"no x.x.{expected_patch} release found: {repo}")
         candidates.sort(key=lambda item: item[0], reverse=True)
-        requires_bin_asset = self._action_requires_single_bin_asset(action)
-        for _, tag in candidates:
-            release = self.fetch_github_web_release(repo, tag)
-            if not requires_bin_asset or self.release_has_single_bin_asset(release):
-                return release
-        raise RuntimeError(f"no x.x.{expected_patch} release with exactly one .bin asset found: {repo}")
+        return self.fetch_github_web_release(repo, candidates[0][1])
 
     def fetch_github_web_release(self, repo: str, tag: str) -> dict[str, Any]:
         quoted_tag = urllib.parse.quote(tag, safe="")
@@ -1639,36 +1540,89 @@ class OtaManager:
         raise FileNotFoundError(f"release asset not found: {download_file}")
 
     @staticmethod
-    def _action_requires_single_bin_asset(action: dict[str, Any]) -> bool:
-        if "require_bin_asset" in action:
-            return bool(action.get("require_bin_asset"))
-        return str(action.get("type", "")) in FIRMWARE_BIN_ACTION_TYPES
-
-    @staticmethod
-    def _release_bin_assets(release: dict[str, Any]) -> list[dict[str, Any]]:
+    def release_bin_asset(release: dict[str, Any]) -> dict[str, Any]:
         assets = release.get("assets", [])
         if not isinstance(assets, list):
             assets = []
 
-        return [
+        bin_assets = [
             asset
             for asset in assets
             if isinstance(asset, dict)
             and asset.get("browser_download_url")
             and str(asset.get("name", "")).lower().endswith(".bin")
         ]
-
-    @classmethod
-    def release_has_single_bin_asset(cls, release: dict[str, Any]) -> bool:
-        return len(cls._release_bin_assets(release)) == 1
-
-    @classmethod
-    def release_bin_asset(cls, release: dict[str, Any]) -> dict[str, Any]:
-        bin_assets = cls._release_bin_assets(release)
         if len(bin_assets) != 1:
             names = ", ".join(str(asset.get("name")) for asset in bin_assets) or "none"
             raise FileNotFoundError(f"expected exactly one .bin release asset, found: {names}")
         return bin_assets[0]
+
+    @staticmethod
+    def release_ota_package_asset(
+        release: dict[str, Any],
+        action: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assets = release.get("assets", [])
+        if not isinstance(assets, list):
+            assets = []
+
+        valid_assets = [
+            asset
+            for asset in assets
+            if isinstance(asset, dict)
+            and asset.get("browser_download_url")
+            and str(asset.get("name", ""))
+        ]
+
+        if action:
+            package_file = action.get("package_file")
+            if package_file:
+                expected_name = str(package_file)
+                if not expected_name.lower().endswith(".zip"):
+                    raise ValueError(f"action.package_file must be a .zip OTA package: {expected_name}")
+                for asset in valid_assets:
+                    if str(asset.get("name", "")) == expected_name:
+                        return asset
+                raise FileNotFoundError(f"configured OTA package release asset not found: {expected_name}")
+
+            # Backward-compatible fallback only when download_file itself is already a zip.
+            download_file = action.get("download_file")
+            if download_file and str(download_file).lower().endswith(".zip"):
+                expected_name = str(download_file)
+                for asset in valid_assets:
+                    if str(asset.get("name", "")) == expected_name:
+                        return asset
+                raise FileNotFoundError(f"configured OTA package release asset not found: {expected_name}")
+
+        package_assets = [
+            asset
+            for asset in valid_assets
+            if str(asset.get("name", "")).lower().endswith(".zip")
+            and (
+                "ota" in str(asset.get("name", "")).lower()
+                or "package" in str(asset.get("name", "")).lower()
+                or "sparse" in str(asset.get("name", "")).lower()
+            )
+        ]
+
+        if len(package_assets) == 1:
+            return package_assets[0]
+
+        zip_assets = [
+            asset
+            for asset in valid_assets
+            if str(asset.get("name", "")).lower().endswith(".zip")
+        ]
+
+        if len(zip_assets) == 1:
+            return zip_assets[0]
+
+        names = ", ".join(str(asset.get("name")) for asset in valid_assets) or "none"
+        raise FileNotFoundError(
+            "expected exactly one OTA package .zip release asset "
+            "or configure action.package_file. assets: "
+            f"{names}"
+        )
 
     def _request_bytes(
         self,
@@ -1781,6 +1735,639 @@ class OtaManager:
             "type": "doip_uds_flash",
             "target": "zcu",
         }
+
+    @staticmethod
+    def _parse_u32(value: Any, field_name: str) -> int:
+        if value is None:
+            raise ValueError(f"missing OTA package manifest field: {field_name}")
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.lower().startswith("0x"):
+                return int(raw, 16)
+            return int(raw, 10)
+        return int(value)
+
+    @staticmethod
+    def _first_present(mapping: dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            if key in mapping:
+                return mapping[key]
+        return None
+
+    @staticmethod
+    def is_sparse_package_path(path: Path) -> bool:
+        if path.is_dir():
+            return (path / "manifest.json").exists() or (path / "ota_segments" / "manifest.json").exists()
+        return path.suffix.lower() == ".zip"
+
+    def _prepare_sparse_package_dir(self, package_path: Path) -> Path:
+        if package_path.is_dir():
+            return package_path
+
+        if package_path.suffix.lower() != ".zip":
+            raise ValueError(f"not an OTA sparse package: {package_path}")
+
+        extract_dir = package_path.with_suffix("")
+        if extract_dir.exists():
+            shutil.rmtree(extract_dir)
+        extract_dir.mkdir(parents=True, exist_ok=True)
+
+        with zipfile.ZipFile(package_path, "r") as archive:
+            root = extract_dir.resolve()
+            for member in archive.infolist():
+                target = (extract_dir / member.filename).resolve()
+                if not str(target).startswith(str(root)):
+                    raise ValueError(f"unsafe path in OTA package zip: {member.filename}")
+            archive.extractall(extract_dir)
+
+        return extract_dir
+
+    def load_sparse_ota_package(self, package_path: Path) -> SparseOtaPackage:
+        package_dir = self._prepare_sparse_package_dir(package_path)
+
+        manifest_candidates = [
+            package_dir / "manifest.json",
+            package_dir / "ota_segments" / "manifest.json",
+        ]
+        manifest_path = next((path for path in manifest_candidates if path.exists()), None)
+        if manifest_path is None:
+            matches = list(package_dir.rglob("manifest.json"))
+            if len(matches) == 1:
+                manifest_path = matches[0]
+        if manifest_path is None or not manifest_path.exists():
+            raise FileNotFoundError(f"manifest.json not found in OTA package: {package_path}")
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        virtual_size = self._parse_u32(manifest.get("virtualSize"), "virtualSize")
+        virtual_crc32 = self._parse_u32(
+            self._first_present(
+                manifest,
+                "virtualImageCrc32",
+                "virtualCRC32",
+                "virtualCrc32",
+                "virtualCRC",
+                "crc32",
+            ),
+            "virtualImageCrc32",
+        )
+        gap_fill_value = self._first_present(manifest, "virtualGapFill", "gapFill")
+        gap_fill = self._parse_u32(0 if gap_fill_value is None else gap_fill_value, "virtualGapFill")
+        total_payload_size = self._parse_u32(
+            manifest.get("totalPayloadSize"),
+            "totalPayloadSize",
+        )
+
+        raw_segments = manifest.get("segments")
+        if not isinstance(raw_segments, list) or not raw_segments:
+            raise ValueError("OTA package manifest has no segments")
+
+        manifest_dir = manifest_path.parent
+        project_dir = manifest_dir.parent
+        segments: list[SparseOtaSegment] = []
+
+        for idx, raw_segment in enumerate(raw_segments):
+            if not isinstance(raw_segment, dict):
+                raise ValueError(f"invalid segment entry at index {idx}")
+
+            segment_index = int(raw_segment.get("index", idx + 1))
+            name = str(raw_segment.get("name") or f"segment{segment_index}")
+            offset = self._parse_u32(
+                self._first_present(
+                    raw_segment,
+                    "offsetFromAppBase",
+                    "offset",
+                    "segmentOffset",
+                    "virtualOffset",
+                    "appOffset",
+                ),
+                f"segments[{idx}].offsetFromAppBase",
+            )
+            size = self._parse_u32(raw_segment.get("size"), f"segments[{idx}].size")
+            crc_value = raw_segment.get("crc32")
+            crc32 = self._parse_u32(crc_value, f"segments[{idx}].crc32") if crc_value is not None else None
+
+            file_name = str(raw_segment.get("file") or f"segment{segment_index}.bin")
+            file_path = Path(file_name)
+            candidates: list[Path]
+            if file_path.is_absolute():
+                candidates = [file_path]
+            else:
+                candidates = [
+                    file_path,
+                    project_dir / file_path,
+                    manifest_dir / file_path,
+                    manifest_dir / file_path.name,
+                    package_dir / file_path,
+                    package_dir / file_path.name,
+                    package_dir / "ota_segments" / file_path.name,
+                ]
+            segment_path = next((path for path in candidates if path.exists()), None)
+            if segment_path is None:
+                raise FileNotFoundError(
+                    f"segment file not found for {name}: {file_name}"
+                )
+
+            data = segment_path.read_bytes()
+            if len(data) != size:
+                raise ValueError(
+                    f"segment size mismatch for {name}: manifest={size}, file={len(data)}, path={segment_path}"
+                )
+
+            segments.append(
+                SparseOtaSegment(
+                    index=segment_index,
+                    name=name,
+                    offset=offset,
+                    size=size,
+                    crc32=crc32,
+                    path=segment_path,
+                    data=data,
+                )
+            )
+
+        segments.sort(key=lambda segment: segment.offset)
+        payload_size = sum(segment.size for segment in segments)
+        if payload_size != total_payload_size:
+            raise ValueError(
+                f"totalPayloadSize mismatch: manifest={total_payload_size}, segments={payload_size}"
+            )
+
+        for index, segment in enumerate(segments):
+            if segment.size <= 0:
+                raise ValueError(f"invalid segment size: {segment.name}")
+            end_offset = segment.offset + segment.size
+            if end_offset > virtual_size:
+                raise ValueError(
+                    f"segment outside virtual image: {segment.name}, end=0x{end_offset:X}, virtual=0x{virtual_size:X}"
+                )
+            if index > 0:
+                prev = segments[index - 1]
+                prev_end = prev.offset + prev.size
+                if segment.offset < prev_end:
+                    raise ValueError(
+                        f"overlapping segments: {prev.name} and {segment.name}"
+                    )
+
+        return SparseOtaPackage(
+            manifest_path=manifest_path,
+            package_dir=package_dir,
+            virtual_size=virtual_size,
+            virtual_crc32=virtual_crc32,
+            gap_fill=gap_fill,
+            total_payload_size=total_payload_size,
+            segments=tuple(segments),
+        )
+
+    @staticmethod
+    def _u32be(value: int) -> bytes:
+        return int(value).to_bytes(4, byteorder="big", signed=False)
+
+    @staticmethod
+    def _build_sparse_manifest_uds(package: SparseOtaPackage) -> bytes:
+        if len(package.segments) <= 0 or len(package.segments) > 255:
+            raise ValueError("invalid sparse segment count")
+
+        payload = bytearray()
+        payload.append(0xB4)
+        payload += OtaManager._u32be(package.virtual_size)
+        payload += OtaManager._u32be(package.virtual_crc32)
+        payload.append(len(package.segments) & 0xFF)
+        payload.append(package.gap_fill & 0xFF)
+
+        for segment in package.segments:
+            payload += OtaManager._u32be(segment.offset)
+            payload += OtaManager._u32be(segment.size)
+
+        return bytes(payload)
+
+    def _send_sparse_manifest_and_download_request(
+        self,
+        sock: socket.socket,
+        package: SparseOtaPackage,
+        *,
+        tester_address: int,
+        zcu_address: int,
+        request_timeout: float,
+        stage_prefix: str,
+    ) -> int:
+        response = self._sensor_gateway_send_uds(
+            sock,
+            bytes([0x10, 0x03]),
+            tester_address,
+            zcu_address,
+            request_timeout,
+        )
+        self._expect_uds_positive(response, 0x10)
+
+        response = self._sensor_gateway_send_uds(
+            sock,
+            self._build_sparse_manifest_uds(package),
+            tester_address,
+            zcu_address,
+            request_timeout,
+        )
+        self._expect_uds_positive(response, 0xB4)
+
+        request_download = (
+            bytes([0x34, 0x00, 0x44])
+            + b"\x00\x00\x00\x00"
+            + self._u32be(package.total_payload_size)
+        )
+        response = self._sensor_gateway_send_uds(
+            sock,
+            request_download,
+            tester_address,
+            zcu_address,
+            request_timeout,
+        )
+        self._expect_uds_positive(response, 0x34)
+
+        if len(response) >= 4:
+            max_block = int.from_bytes(response[2:4], "big")
+            max_payload = max_block - 2
+            if max_payload <= 0:
+                raise SensorGatewayDoipError(
+                    f"{stage_prefix} invalid RequestDownload maxBlock={max_block}"
+                )
+            return max_payload
+
+        return 512
+
+    def _wait_sparse_gateway_ready(
+        self,
+        sock: socket.socket,
+        *,
+        tester_address: int,
+        zcu_address: int,
+        request_timeout: float,
+        ready_timeout_seconds: float,
+    ) -> None:
+        deadline = time.monotonic() + ready_timeout_seconds
+        while time.monotonic() < deadline:
+            response = self._sensor_gateway_send_uds(
+                sock,
+                bytes([0xB5]),
+                tester_address,
+                zcu_address,
+                request_timeout,
+            )
+            if len(response) >= 2 and response[0] == 0xF5 and response[1] == 0x01:
+                return
+            if len(response) >= 2 and response[0] == 0xF5 and response[1] == 0x7F:
+                raise SensorGatewayDoipError("OTA gateway entered error state during ReadyCheck")
+            time.sleep(1.0)
+        raise SensorGatewayDoipError("timeout waiting OTA gateway ready")
+
+    def _transfer_sparse_package_stream(
+        self,
+        sock: socket.socket,
+        package: SparseOtaPackage,
+        *,
+        tester_address: int,
+        zcu_address: int,
+        request_timeout: float,
+        chunk_size: int,
+        block_delay_seconds: float,
+        progress: dict[str, Any] | None,
+        percent_start: int,
+        percent_end: int,
+        progress_update_interval_blocks: int,
+        progress_message: str,
+    ) -> int:
+        payload = package.payload
+        total = len(payload)
+        offset = 0
+        seq = 1
+        block_count = 0
+        last_progress_block = -progress_update_interval_blocks
+
+        while offset < total:
+            chunk = payload[offset:offset + chunk_size]
+            response = self._sensor_gateway_send_uds(
+                sock,
+                bytes([0x36, seq]) + chunk,
+                tester_address,
+                zcu_address,
+                request_timeout,
+            )
+            self._expect_uds_positive(response, 0x36)
+            if len(response) >= 2 and response[1] != seq:
+                raise SensorGatewayDoipError(
+                    f"TransferData sequence mismatch: sent=0x{seq:02X}, got=0x{response[1]:02X}"
+                )
+
+            offset += len(chunk)
+            seq = 0 if seq >= 0xFF else seq + 1
+            block_count += 1
+
+            if progress:
+                raw_percent = min(100, int(offset * 100 / total)) if total else 100
+                percent = percent_start + int(raw_percent * (percent_end - percent_start) / 100)
+                if (
+                    block_count - last_progress_block >= progress_update_interval_blocks
+                    or offset >= total
+                ):
+                    last_progress_block = block_count
+                    self.update_progress(
+                        str(progress["feature_id"]),
+                        action_id=str(progress["action_id"]),
+                        action_type=str(progress["action_type"]),
+                        target=str(progress["target"]),
+                        phase="install",
+                        status="flashing",
+                        percent=percent,
+                        message=progress_message,
+                        active=True,
+                        bytes_downloaded=offset,
+                        total_bytes=total,
+                    )
+
+            if block_delay_seconds > 0:
+                time.sleep(block_delay_seconds)
+
+        return block_count
+
+    def flash_sparse_package_via_doip(
+        self,
+        package_path: Path,
+        feature_id: str,
+        action: dict[str, Any],
+        *,
+        progress: dict[str, Any] | None = None,
+    ) -> bool:
+        if not package_path.exists():
+            raise FileNotFoundError(f"OTA package not found: {package_path}")
+
+        package = self.load_sparse_ota_package(package_path)
+        total = package.total_payload_size
+        ecu_ip = str(action.get("ecu_ip", "192.168.10.2"))
+        doip_port = int(action.get("doip_port", 13400))
+        tester_address = int(action.get("tester_address", 0x0E00))
+        zcu_address = int(action.get("ecu_address", action.get("zcu_address", 0x0001)))
+        request_timeout = float(action.get("timeout_seconds", 60.0))
+        chunk_size = int(action.get("chunk_size", 512))
+        block_delay = float(action.get("block_delay_seconds", 0.0))
+        percent_start = int((progress or {}).get("percent_start", 50))
+        percent_end = int((progress or {}).get("percent_end", 100))
+        progress_update_interval_blocks = max(1, int(action.get("progress_update_interval_blocks", 10)))
+
+        if chunk_size <= 0 or chunk_size > 512:
+            raise ValueError("ZCU sparse OTA chunk_size must be 1..512")
+
+        stage = "connecting ZCU self DoIP"
+        network_lock_acquired = False
+        try:
+            self._enter_flash()
+            if self._flash_network_lock is not None:
+                self._flash_network_lock.acquire()
+                network_lock_acquired = True
+
+            with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
+                sock.settimeout(request_timeout)
+
+                stage = "routing activation"
+                self._sensor_gateway_activate_routing(sock, tester_address)
+
+                max_payload = self._send_sparse_manifest_and_download_request(
+                    sock,
+                    package,
+                    tester_address=tester_address,
+                    zcu_address=zcu_address,
+                    request_timeout=request_timeout,
+                    stage_prefix="ZCU sparse OTA",
+                )
+                data_block_size = min(chunk_size, max_payload)
+
+                if progress:
+                    self.update_progress(
+                        str(progress["feature_id"]),
+                        action_id=str(progress["action_id"]),
+                        action_type=str(progress["action_type"]),
+                        target=str(progress["target"]),
+                        phase="install",
+                        status="flashing",
+                        percent=percent_start,
+                        message=(
+                            f"ZCU sparse OTA 시작: "
+                            f"payload={total}, block={data_block_size}, crc=0x{package.virtual_crc32:08X}"
+                        ),
+                        active=True,
+                        bytes_downloaded=0,
+                        total_bytes=total,
+                    )
+
+                stage = "TransferData"
+                block_count = self._transfer_sparse_package_stream(
+                    sock,
+                    package,
+                    tester_address=tester_address,
+                    zcu_address=zcu_address,
+                    request_timeout=request_timeout,
+                    chunk_size=data_block_size,
+                    block_delay_seconds=block_delay,
+                    progress=progress,
+                    percent_start=percent_start,
+                    percent_end=percent_end,
+                    progress_update_interval_blocks=progress_update_interval_blocks,
+                    progress_message=str((progress or {}).get("message", "ZCU sparse OTA 전송 중")),
+                )
+
+                stage = f"RequestTransferExit crc32=0x{package.virtual_crc32:08X}"
+                response = self._sensor_gateway_send_uds(
+                    sock,
+                    bytes([0x37]) + self._u32be(package.virtual_crc32),
+                    tester_address,
+                    zcu_address,
+                    request_timeout,
+                )
+                self._expect_uds_positive(response, 0x37)
+
+                if progress:
+                    self.update_progress(
+                        str(progress["feature_id"]),
+                        action_id=str(progress["action_id"]),
+                        action_type=str(progress["action_type"]),
+                        target=str(progress["target"]),
+                        phase="install",
+                        status="flashing",
+                        percent=percent_end,
+                        message=f"ZCU TransferExit OK: blocks={block_count}",
+                        active=True,
+                        bytes_downloaded=total,
+                        total_bytes=total,
+                    )
+
+            return True
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(
+                f"ZCU sparse OTA failed during {stage}: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            if network_lock_acquired and self._flash_network_lock is not None:
+                self._flash_network_lock.release()
+            self._leave_flash()
+
+    def flash_sensor_sparse_package_via_doip(
+        self,
+        package_path: Path,
+        feature_id: str,
+        action: dict[str, Any],
+        *,
+        progress: dict[str, Any] | None = None,
+    ) -> bool:
+        if not package_path.exists():
+            raise FileNotFoundError(f"OTA package not found: {package_path}")
+
+        package = self.load_sparse_ota_package(package_path)
+        total = package.total_payload_size
+        ecu_ip = str(action.get("ecu_ip", "192.168.10.2"))
+        doip_port = int(action.get("doip_port", 13401))
+        tester_address = int(action.get("tester_address", 0x0E00))
+        zcu_address = int(action.get("ecu_address", action.get("zcu_address", 0x0001)))
+        request_timeout = float(action.get("timeout_seconds", 60.0))
+        ready_timeout_seconds = float(action.get("ready_check_timeout_seconds", 120.0))
+        block_size = int(action.get("block_size", action.get("chunk_size", 32)))
+        block_delay = float(action.get("block_delay_seconds", 0.0))
+        activate = bool(action.get("activate_after_transfer", False))
+        percent_start = int((progress or {}).get("percent_start", 0))
+        percent_end = int((progress or {}).get("percent_end", 100))
+        progress_update_interval_blocks = max(1, int(action.get("progress_update_interval_blocks", 50)))
+
+        if block_size <= 0 or block_size > SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE:
+            raise ValueError(
+                f"block_size must be 1..{SENSOR_CAN_OTA_MAX_DATA_BLOCK_SIZE} "
+                "for Sensor ECU sparse OTA gateway"
+            )
+
+        stage = "connecting Sensor ECU sparse OTA DoIP gateway"
+        network_lock_acquired = False
+        try:
+            self._enter_flash()
+            if self._flash_network_lock is not None:
+                self._flash_network_lock.acquire()
+                network_lock_acquired = True
+
+            with socket.create_connection((ecu_ip, doip_port), timeout=request_timeout) as sock:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
+                sock.settimeout(request_timeout)
+
+                stage = "routing activation"
+                self._sensor_gateway_activate_routing(sock, tester_address)
+
+                max_payload = self._send_sparse_manifest_and_download_request(
+                    sock,
+                    package,
+                    tester_address=tester_address,
+                    zcu_address=zcu_address,
+                    request_timeout=request_timeout,
+                    stage_prefix="Sensor sparse OTA",
+                )
+                data_block_size = min(block_size, max_payload)
+
+                stage = "B5 ReadyCheck"
+                self._wait_sparse_gateway_ready(
+                    sock,
+                    tester_address=tester_address,
+                    zcu_address=zcu_address,
+                    request_timeout=request_timeout,
+                    ready_timeout_seconds=ready_timeout_seconds,
+                )
+
+                if progress:
+                    self.update_progress(
+                        str(progress["feature_id"]),
+                        action_id=str(progress["action_id"]),
+                        action_type=str(progress["action_type"]),
+                        target=str(progress["target"]),
+                        phase="install",
+                        status="flashing",
+                        percent=percent_start,
+                        message=(
+                            f"Sensor sparse OTA 시작: "
+                            f"payload={total}, block={data_block_size}, crc=0x{package.virtual_crc32:08X}"
+                        ),
+                        active=True,
+                        bytes_downloaded=0,
+                        total_bytes=total,
+                    )
+
+                stage = "TransferData"
+                block_count = self._transfer_sparse_package_stream(
+                    sock,
+                    package,
+                    tester_address=tester_address,
+                    zcu_address=zcu_address,
+                    request_timeout=request_timeout,
+                    chunk_size=data_block_size,
+                    block_delay_seconds=block_delay,
+                    progress=progress,
+                    percent_start=percent_start,
+                    percent_end=percent_end,
+                    progress_update_interval_blocks=progress_update_interval_blocks,
+                    progress_message=str((progress or {}).get("message", "Sensor ECU sparse OTA 중")),
+                )
+
+                stage = f"RequestTransferExit crc32=0x{package.virtual_crc32:08X}"
+                response = self._sensor_gateway_send_uds(
+                    sock,
+                    bytes([0x37]) + self._u32be(package.virtual_crc32),
+                    tester_address,
+                    zcu_address,
+                    request_timeout,
+                )
+                self._expect_uds_positive(response, 0x37)
+
+                if activate:
+                    stage = "ECUReset"
+                    response = self._sensor_gateway_send_uds(
+                        sock,
+                        bytes([0x11, 0x01]),
+                        tester_address,
+                        zcu_address,
+                        request_timeout,
+                    )
+                    self._expect_uds_positive(response, 0x11)
+                    if len(response) >= 2 and response[1] != 0x01:
+                        raise SensorGatewayDoipError(
+                            f"ECUReset subfunction mismatch: expected=0x01, got=0x{response[1]:02X}"
+                        )
+
+                if progress:
+                    self.update_progress(
+                        str(progress["feature_id"]),
+                        action_id=str(progress["action_id"]),
+                        action_type=str(progress["action_type"]),
+                        target=str(progress["target"]),
+                        phase="install",
+                        status="flashing",
+                        percent=percent_end,
+                        message=f"Sensor TransferExit OK: blocks={block_count}",
+                        active=True,
+                        bytes_downloaded=total,
+                        total_bytes=total,
+                    )
+
+            return True
+        except Exception as exc:
+            if isinstance(exc, RuntimeError):
+                raise
+            raise RuntimeError(
+                f"Sensor ECU sparse OTA failed during {stage}: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            if network_lock_acquired and self._flash_network_lock is not None:
+                self._flash_network_lock.release()
+            self._leave_flash()
 
     def flash_bin_via_doip(
         self,
@@ -2256,13 +2843,7 @@ class OtaManager:
                 if not got_ack:
                     # Some ZCU builds may send the diagnostic response before the ACK.
                     pass
-                if (
-                    len(response) >= 3
-                    and response[0] == SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE
-                    and response[2] == SENSOR_GATEWAY_UDS_NRC_RESPONSE_PENDING
-                ):
-                    continue
-                if len(response) >= 3 and response[0] == SENSOR_GATEWAY_UDS_NEGATIVE_RESPONSE:
+                if len(response) >= 3 and response[0] == 0x7F:
                     raise SensorGatewayDoipError(
                         f"UDS negative response: sid=0x{response[1]:02X}, nrc=0x{response[2]:02X}"
                     )
