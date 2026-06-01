@@ -405,15 +405,6 @@ STORE_CATALOG = [
             }
         ],
     },
-    {
-        "id": "LUFFY_THEME",
-        "name": "테마(루피)",
-        "full_name": "루피 테마",
-        "description": "대시보드에 적용할 수 있는 루피 스타일 테마입니다.",
-        "kind": "theme",
-        "latest_version": "1.0.0",
-        "downloadable": False,
-    },
 ]
 
 STORE_ITEM_IDS = {item["id"] for item in STORE_CATALOG}
@@ -799,7 +790,11 @@ class FeatureStateStore:
         normalized = {
             "schema_version": 2,
             "purchased": [item for item in purchased if isinstance(item, str)],
-            "purchase_history": [item for item in purchase_history if isinstance(item, dict)],
+            "purchase_history": [
+                item
+                for item in purchase_history
+                if isinstance(item, dict) and item.get("feature_id") in STORE_ITEM_IDS
+            ],
             "pending_ota": {"to_install": [], "to_update": [], "checked_at": None},
             "items": {},
         }
@@ -2023,7 +2018,7 @@ class VehicleStatus:
             }
 
     def set_theme(self, theme: str) -> dict:
-        if theme not in ("dark", "light", "blue", "luffy"):
+        if theme not in ("dark", "light", "blue"):
             raise ValueError(f"unsupported theme: {theme}")
         with self._lock:
             self._ui_theme = theme
@@ -2086,7 +2081,7 @@ class VehicleStatus:
                 "ui_theme": self._ui_theme,
                 "balance": 0,
                 "firmware_versions": {},
-                "available_themes": ["luffy"] if "LUFFY_THEME" in purchased else [],
+                "available_themes": [],
             }
 
 
@@ -2639,7 +2634,7 @@ def api_server_worker(
             import uvicorn
             from ethernet import parse_payload, send_ethernet_message
             from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-            from fastapi.responses import FileResponse, Response
+            from fastapi.responses import FileResponse
             from fastapi.staticfiles import StaticFiles
             from pydantic import BaseModel, Field
             from starlette.concurrency import run_in_threadpool
@@ -2670,7 +2665,7 @@ def api_server_worker(
             feature_id: str
 
         class ThemeRequest(BaseModel):
-            theme: Literal["dark", "light", "blue", "luffy"]
+            theme: Literal["dark", "light", "blue"]
 
         class OtaDecisionRequest(BaseModel):
             do_update: bool
@@ -3173,9 +3168,7 @@ def api_server_worker(
                 board_versions["ZCU"] = firmware_version(aeb_zcu["version"]) or board_versions.get("ZCU", "-")
             payload["firmware_versions"] = board_versions
             payload["pending_ota"] = feature_state_store.pending_ota()
-            payload["available_themes"] = (
-                ["luffy"] if feature_state_store.feature_record("LUFFY_THEME")["purchased"] else []
-            )
+            payload["available_themes"] = []
             internet = internet_status.snapshot()
             vehicle_link = vehicle_computer_connection_payload()
             payload["network"] = {
@@ -3294,19 +3287,6 @@ def api_server_worker(
             if not dashboard_store.exists():
                 raise HTTPException(status_code=404, detail="dashboard store.html not found")
             return FileResponse(dashboard_store, headers=no_store_headers())
-
-        @app.get("/themes/{theme_id}.css", include_in_schema=False)
-        async def theme_css(theme_id: str) -> Response:
-            if theme_id != "luffy":
-                raise HTTPException(status_code=404, detail="theme css not found")
-            css = """
-[data-theme="luffy"] .luffy-deco{display:block}
-[data-theme="luffy"] .storebtn,
-[data-theme="luffy"] .ota-banner-btn,
-[data-theme="luffy"] .bpri,
-[data-theme="luffy"] .lactbtn{background:linear-gradient(135deg,#c87de8,#ff8bc8);color:#4a2060}
-"""
-            return Response(content=css.strip(), media_type="text/css")
 
         @app.get("/api/health")
         async def health() -> dict:
@@ -3630,17 +3610,9 @@ def api_server_worker(
             heartbeat()
             return await run_in_threadpool(fetch_weather)
 
-        @app.get("/api/theme-available/{theme_id}")
-        async def theme_available(theme_id: str) -> dict:
-            heartbeat()
-            available = theme_id != "luffy" or feature_state_store.feature_record("LUFFY_THEME")["purchased"]
-            return {"theme": theme_id, "available": available}
-
         @app.post("/api/theme")
         async def set_theme(body: ThemeRequest) -> dict:
             heartbeat()
-            if body.theme == "luffy" and not feature_state_store.feature_record("LUFFY_THEME")["purchased"]:
-                raise HTTPException(status_code=400, detail="luffy theme is not purchased")
             return {"success": True, "vehicle_status": vehicle_status.set_theme(body.theme)}
 
         @app.post("/api/ota/check")
@@ -3712,21 +3684,6 @@ def api_server_worker(
                 "accepted": True,
                 "result": result,
                 "pending_ota": feature_state_store.pending_ota(),
-            }
-
-        @app.post("/api/demo/reveal-luffy")
-        async def demo_reveal_luffy() -> dict:
-            heartbeat()
-            return {
-                "success": True,
-                "items": [
-                    {
-                        "id": "LUFFY_THEME",
-                        "icon": "THEME",
-                        "name": "테마(루피)",
-                        "desc": "루피 테마가 스토어에 표시됩니다.",
-                    }
-                ],
             }
 
         @app.post("/api/demo/fvsa-buzzer")
