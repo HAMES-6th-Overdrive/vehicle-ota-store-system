@@ -12,8 +12,10 @@ typedef struct
     uint8 (*enterPageMode)(uint32 pageAddr);
     void  (*load2X32bits)(uint32 pageAddr, uint32 wordL, uint32 wordU);
     void  (*writePage)(uint32 pageAddr);
+    void  (*writeBurst)(uint32 pageAddr);
     uint32 (*eraseWrapper)(uint32 sectorAddr, uint32 sectorCount, IfxFlash_FlashType flashType);
     void  (*writePageFull)(uint32 pageAddr, uint8 *buf, IfxFlash_FlashType flashType);
+    void  (*writeBurstFull)(uint32 pageAddr, uint8 *buf, IfxFlash_FlashType flashType);
 } SensorOtaFlashFunc_t;
 
 static SensorOtaFlashFunc_t g_func;
@@ -111,6 +113,27 @@ static void writePageWrapper(uint32 pageAddr, uint8 *buf, IfxFlash_FlashType fla
     g_func.waitUnbusy(SENSOR_OTA_FLASH_MODULE, flashType);
 }
 
+static void writeBurstWrapper(uint32 pageAddr, uint8 *buf, IfxFlash_FlashType flashType)
+{
+    uint16 pw = IfxScuWdt_getSafetyWatchdogPasswordInline();
+
+    g_func.enterPageMode(pageAddr);
+    g_func.waitUnbusy(SENSOR_OTA_FLASH_MODULE, flashType);
+
+    for (uint16 offset = 0U; offset < SENSOR_OTA_PFLASH_BURST_LEN; offset += 8U)
+    {
+        g_func.load2X32bits(pageAddr,
+                            *((uint32 *)(buf + offset)),
+                            *((uint32 *)(buf + offset + 4U)));
+    }
+
+    IfxScuWdt_clearSafetyEndinitInline(pw);
+    g_func.writeBurst(pageAddr);
+    IfxScuWdt_setSafetyEndinitInline(pw);
+
+    g_func.waitUnbusy(SENSOR_OTA_FLASH_MODULE, flashType);
+}
+
 static void copyFuncsToPspr(void)
 {
     if (g_funcCopied == TRUE)
@@ -123,16 +146,20 @@ static void copyFuncsToPspr(void)
     memcpy((void *)SENSOR_OTA_ENTERPAGEMODE_ADDR, (const void *)IfxFlash_enterPageMode, SENSOR_OTA_ENTERPAGEMODE_LEN);
     memcpy((void *)SENSOR_OTA_LOAD2X32_ADDR,      (const void *)IfxFlash_loadPage2X32, SENSOR_OTA_LOAD2X32_LEN);
     memcpy((void *)SENSOR_OTA_WRITEPAGE_ADDR,     (const void *)IfxFlash_writePage,    SENSOR_OTA_WRITEPAGE_LEN);
+    memcpy((void *)SENSOR_OTA_WRITEBURST_ADDR,    (const void *)IfxFlash_writeBurst,   SENSOR_OTA_WRITEBURST_LEN);
     memcpy((void *)SENSOR_OTA_ERASEWRAPPER_ADDR,  (const void *)eraseWrapper,          SENSOR_OTA_ERASEWRAPPER_LEN);
     memcpy((void *)SENSOR_OTA_WRITEWRAPPER_ADDR,  (const void *)writePageWrapper,      SENSOR_OTA_WRITEWRAPPER_LEN);
+    memcpy((void *)SENSOR_OTA_BURSTWRAPPER_ADDR,  (const void *)writeBurstWrapper,     SENSOR_OTA_BURSTWRAPPER_LEN);
 
     g_func.eraseSectorCmd = (void *)SENSOR_OTA_ERASESECTOR_ADDR;
     g_func.waitUnbusy = (void *)SENSOR_OTA_WAITUNBUSY_ADDR;
     g_func.enterPageMode = (void *)SENSOR_OTA_ENTERPAGEMODE_ADDR;
     g_func.load2X32bits = (void *)SENSOR_OTA_LOAD2X32_ADDR;
     g_func.writePage = (void *)SENSOR_OTA_WRITEPAGE_ADDR;
+    g_func.writeBurst = (void *)SENSOR_OTA_WRITEBURST_ADDR;
     g_func.eraseWrapper = (void *)SENSOR_OTA_ERASEWRAPPER_ADDR;
     g_func.writePageFull = (void *)SENSOR_OTA_WRITEWRAPPER_ADDR;
+    g_func.writeBurstFull = (void *)SENSOR_OTA_BURSTWRAPPER_ADDR;
 
     g_funcCopied = TRUE;
 }
@@ -249,6 +276,51 @@ boolean SensorOtaFlash_Write(uint32 addr, const uint8 *data, uint16 len, IfxFlas
 
         writeAddr += SENSOR_OTA_PFLASH_PAGE_LEN;
         offset += SENSOR_OTA_PFLASH_PAGE_LEN;
+    }
+
+    IfxCpu_restoreInterrupts(irq);
+    return TRUE;
+}
+
+boolean SensorOtaFlash_WriteBurst(uint32 addr, const uint8 *data, uint16 len, IfxFlash_FlashType flashType)
+{
+    uint32 writeAddr;
+    uint16 offset = 0U;
+    uint32 burstBuf[SENSOR_OTA_PFLASH_BURST_LEN / 4U] IFX_ALIGN(4);
+    boolean irq;
+
+    if ((data == NULL_PTR) || (len == 0U))
+    {
+        return FALSE;
+    }
+
+    copyFuncsToPspr();
+
+    writeAddr = SENSOR_OTA_TO_FLASH_ADDR(addr);
+    irq = IfxCpu_disableInterrupts();
+
+    IfxFlash_clearStatus(SENSOR_OTA_FLASH_MODULE);
+
+    while (offset < len)
+    {
+        uint16 copyLen;
+
+        memset(burstBuf, 0xFF, SENSOR_OTA_PFLASH_BURST_LEN);
+
+        copyLen = ((len - offset) > SENSOR_OTA_PFLASH_BURST_LEN) ?
+                  SENSOR_OTA_PFLASH_BURST_LEN : (uint16)(len - offset);
+        memcpy(burstBuf, data + offset, copyLen);
+
+        g_func.writeBurstFull(writeAddr, (uint8 *)burstBuf, flashType);
+
+        if (MODULE_DMU.HF_ERRSR.U != 0U)
+        {
+            IfxCpu_restoreInterrupts(irq);
+            return FALSE;
+        }
+
+        writeAddr += SENSOR_OTA_PFLASH_BURST_LEN;
+        offset += SENSOR_OTA_PFLASH_BURST_LEN;
     }
 
     IfxCpu_restoreInterrupts(irq);

@@ -7,27 +7,27 @@
     "virtualBase":  "0x80020000",
     "virtualEnd":  "0x802FE160",
     "virtualSize":  3006816,
-    "virtualImageCrc32":  "0xBADEE14F",
+    "virtualImageCrc32":  "0x71CE985D",
     "virtualGapFill":  "0x00",
-    "virtualUsedBytesFromHex":  44608,
-    "virtualFillBytes":  2962208,
+    "virtualUsedBytesFromHex":  45888,
+    "virtualFillBytes":  2960928,
     "mergeGapBytes":  4096,
     "alignBytes":  32,
     "segmentCount":  2,
-    "totalPayloadSize":  44608,
-    "totalUsedBytesFromHex":  44135,
-    "totalFillBytes":  473,
+    "totalPayloadSize":  45888,
+    "totalUsedBytesFromHex":  45410,
+    "totalFillBytes":  478,
     "segments":  [
                      {
                          "index":  1,
                          "name":  "segment1",
                          "address":  "0x80020000",
                          "offsetFromAppBase":  "0x00000000",
-                         "endExclusive":  "0x8002AD00",
-                         "size":  44288,
-                         "usedBytesFromHex":  44095,
-                         "fillBytes":  193,
-                         "crc32":  "0xE3230D05",
+                         "endExclusive":  "0x8002B200",
+                         "size":  45568,
+                         "usedBytesFromHex":  45370,
+                         "fillBytes":  198,
+                         "crc32":  "0xC213614A",
                          "file":  ".\\ota_segments\\segment1.bin"
                      },
                      {
@@ -39,7 +39,7 @@
                          "size":  320,
                          "usedBytesFromHex":  40,
                          "fillBytes":  280,
-                         "crc32":  "0x6D8524F5",
+                         "crc32":  "0x6B210C31",
                          "file":  ".\\ota_segments\\segment2.bin"
                      }
                  ]

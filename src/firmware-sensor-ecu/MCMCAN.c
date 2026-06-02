@@ -34,6 +34,7 @@
 #include "IfxCpu.h"
 #include "FeatureConfig.h"
 #include "UdsOta.h"
+#include "AppVersion.h"
 
 #if (FEATURE_TOF_SENSOR == 1U)
 #include "TofSensor.h"
@@ -47,7 +48,7 @@
 
 McmcanType g_mcmcan;
 
-#define CAN_TX_STUCK_LIMIT_1MS   20U
+#define CAN_TX_STUCK_LIMIT_1MS   1U
 
 static volatile uint32_t g_txInProgressTicks = 0U;
 
@@ -520,7 +521,7 @@ void CanIf_onReceive(uint32 id, const uint8_t *data, uint8_t length)
         case CAN_ID_VERSION_REQUEST:
         {
             /* ZCU에서 버전 요청이 오면 0x703 Sensor Version을 송신한다. */
-            const char *versionStr = APP_FRONTZCU_VERSION;
+            const char *versionStr = APP_SENSOR_VERSION;
             uint8_t versionData[CAN_DLC_ECU_VERSION] = {0};
             strncpy((char *)versionData, versionStr, CAN_DLC_ECU_VERSION);
 

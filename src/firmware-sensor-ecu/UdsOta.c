@@ -902,6 +902,13 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
     g_udsOtaDebug.expectedCrc32 = expectedCrc32;
     g_udsOtaDebug.calculatedCrc32 = calculatedCrc32;
 
+    if (Target_PrepareActivation() == FALSE)
+    {
+        sendNegativeResponse(UDS_SID_ROUTINE_CONTROL,
+                             UDS_NRC_GENERAL_PROGRAMMING_FAILURE);
+        return;
+    }
+
     responsePayload[0] = routineControlType;
     writeU16Le(&responsePayload[1], routineId);
     writeU32Le(&responsePayload[3], calculatedCrc32);
@@ -912,8 +919,8 @@ static void handleRoutineControl(const uint8_t *payload, uint8_t length)
 
     /*
      * front-zcu OTA와 동일하게 CRC 값은 bootloader 검증용 flag에 넘긴다.
-     * 0x71 응답을 먼저 queue에 올린 뒤 background FlashOta_Service()에서
-     * flag 저장과 system reset을 수행한다.
+     * Target_PrepareActivation()은 flag write를 pending으로만 세우고,
+     * background FlashOta_Service()에서 실제 flag 저장과 system reset을 수행한다.
      */
     g_udsOtaDebug.state = UDS_OTA_STATE_READY_TO_ACTIVATE;
     //(void)Target_EcuReset(UDS_RESET_JUMP_TO_APP);
@@ -933,16 +940,11 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
         return;
     }
 
-    if (g_udsOtaDebug.state != UDS_OTA_STATE_READY_TO_ACTIVATE)
-    {
-        sendNegativeResponse(UDS_SID_ECU_RESET,
-                             UDS_NRC_CONDITIONS_NOT_CORRECT);
-        return;
-    }
-
     resetType = payload[1];
 
-    if (resetType != UDS_RESET_JUMP_TO_APP)
+    if ((resetType != UDS_RESET_HARD_RESET) &&
+        (resetType != UDS_RESET_KEY_OFF_ON_RESET) &&
+        (resetType != UDS_RESET_SOFT_RESET))
     {
         sendNegativeResponse(UDS_SID_ECU_RESET,
                              UDS_NRC_REQUEST_OUT_OF_RANGE);
@@ -957,6 +959,11 @@ static void handleEcuReset(const uint8_t *payload, uint8_t length)
 
     g_udsOtaDebug.state = UDS_OTA_STATE_RESET_REQUESTED;
 
+    /*
+     * ECUReset is accepted independently of the OTA activation state.
+     * FlashOta_Service() performs the delayed system reset so the positive
+     * response can leave the TX queue first.
+     */
     (void)Target_EcuReset(resetType);
 }
 
